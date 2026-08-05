@@ -227,7 +227,8 @@ impl Transport for MockTransport {
     }
 
     async fn poll_read(&mut self, timeout: Duration) -> Result<PollStatus, TransportError> {
-        if self.rx.closed.load(Ordering::SeqCst) {
+        // The peer half of the pipe is gone: like a real socket EOF.
+        if self.rx.closed.load(Ordering::SeqCst) || Arc::strong_count(&self.rx) == 1 {
             return Err(TransportError::Closed);
         }
         if !self.rx.buf.lock().unwrap().is_empty() {
@@ -244,8 +245,8 @@ impl Transport for MockTransport {
             if let Some(n) = self.rx.pop(buf) {
                 return Ok(n);
             }
-            if self.rx.closed.load(Ordering::SeqCst) {
-                return Ok(0);
+            if self.rx.closed.load(Ordering::SeqCst) || Arc::strong_count(&self.rx) == 1 {
+                return Err(TransportError::Closed);
             }
             self.rx.notify.notified().await;
         }
@@ -310,7 +311,11 @@ mod tests {
         a.connect("").await.unwrap();
         a.disconnect().await;
         let mut buf = [0u8; 4];
-        assert_eq!(b.recv(&mut buf).await.unwrap(), 0);
+        // EOF surfaces as a Closed error, like the real RFCOMM socket.
+        assert!(matches!(
+            b.recv(&mut buf).await,
+            Err(TransportError::Closed)
+        ));
         assert!(matches!(
             b.poll_read(Duration::from_millis(100)).await,
             Err(TransportError::Closed)

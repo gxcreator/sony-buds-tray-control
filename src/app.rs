@@ -73,11 +73,15 @@ pub enum UiCommand {
     SetBgmRoomSize(RoomSize),
     SetCinema(bool),
     SetGeneralSetting(usize, bool),
+    SetAutoConnect(bool),
     Quit,
 }
 
 /// Hard bound on the whole connect operation (transport + SDP + handshake).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Delay between automatic reconnection attempts after a lost link.
+pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnState {
@@ -215,10 +219,26 @@ pub struct AppCore {
     last_sync: std::time::Instant,
     pub menu_dirty: bool,
     refresh_pending: bool,
+    config: crate::config::Config,
+    auto_connect_done: bool,
+    /// Auto-reconnection is armed (link lost, waiting for the device to
+    /// come back).
+    reconnect: bool,
+    next_reconnect: std::time::Instant,
+    pub reconnect_delay: Duration,
 }
 
 impl AppCore {
     pub fn new(lister: Arc<dyn DeviceLister>, factory: Arc<dyn TransportFactory>) -> Self {
+        Self::new_with_config(lister, factory, crate::config::Config::load())
+    }
+
+    /// Like [`AppCore::new`] but with an explicit config (used by tests).
+    pub fn new_with_config(
+        lister: Arc<dyn DeviceLister>,
+        factory: Arc<dyn TransportFactory>,
+        config: crate::config::Config,
+    ) -> Self {
         Self {
             conn_state: ConnState::NotConnected,
             devices: Vec::new(),
@@ -232,6 +252,11 @@ impl AppCore {
             last_sync: std::time::Instant::now() - Duration::from_secs(120),
             menu_dirty: true,
             refresh_pending: true,
+            config,
+            auto_connect_done: false,
+            reconnect: false,
+            next_reconnect: std::time::Instant::now(),
+            reconnect_delay: RECONNECT_DELAY,
         }
     }
 
@@ -257,6 +282,8 @@ impl AppCore {
                 {
                     return;
                 }
+                self.config.last_device = Some(mac.clone());
+                self.config.save();
                 self.connected_mac = Some(mac);
                 self.conn_state = ConnState::Connecting;
             }
@@ -432,6 +459,13 @@ impl AppCore {
                     }
                 }
             }
+            SetAutoConnect(v) => {
+                self.config.auto_connect = v;
+                if !v {
+                    self.reconnect = false;
+                }
+                self.config.save();
+            }
             Quit => {}
         }
         self.menu_dirty = true;
@@ -471,6 +505,22 @@ impl AppCore {
             self.refresh_devices_async().await;
         }
 
+        // Auto-connect to the last device once, at startup.
+        if !self.auto_connect_done {
+            self.auto_connect_done = true;
+            if self.config.auto_connect
+                && self.conn_state == ConnState::NotConnected
+                && self.connected_mac.is_none()
+            {
+                if let Some(mac) = self.config.last_device.clone() {
+                    log::info!("auto-connecting to last device {mac}");
+                    self.connected_mac = Some(mac);
+                    self.conn_state = ConnState::Connecting;
+                    self.menu_dirty = true;
+                }
+            }
+        }
+
         // Drive the connection process.
         match &self.conn_state {
             ConnState::Connecting => {
@@ -491,6 +541,7 @@ impl AppCore {
                                 } else {
                                     self.engine = Some(engine);
                                     self.conn_state = ConnState::Connected;
+                                    self.reconnect = false;
                                     log::info!("init handshake started");
                                 }
                             }
@@ -498,6 +549,7 @@ impl AppCore {
                                 log::error!("connect to {mac} failed: {e}");
                                 self.conn_state = ConnState::Error(format!("Connect failed: {e}"));
                                 self.last_error = Some(self.conn_state_str());
+                                self.arm_reconnect();
                             }
                             Err(_) => {
                                 log::error!("connect to {mac} timed out after {CONNECT_TIMEOUT:?}");
@@ -505,6 +557,7 @@ impl AppCore {
                                     "Connect timed out after {CONNECT_TIMEOUT:?}"
                                 ));
                                 self.last_error = Some(self.conn_state_str());
+                                self.arm_reconnect();
                             }
                         }
                     }
@@ -512,6 +565,7 @@ impl AppCore {
                         log::error!("transport factory error: {e}");
                         self.conn_state = ConnState::Error(e);
                         self.last_error = Some(self.conn_state_str());
+                        self.arm_reconnect();
                     }
                 }
                 self.menu_dirty = true;
@@ -566,7 +620,25 @@ impl AppCore {
                     self.teardown(Some(msg));
                 }
             }
-            _ => {}
+            ConnState::NotConnected | ConnState::Error(_) => {
+                // Passive auto-reconnect: never attempt connections while the
+                // device is away (that spams failing SDP/RFCOMM connects).
+                // Instead, rescan BlueZ periodically and attach only once the
+                // headphone is back and connected (e.g. via the system UI).
+                if self.reconnect && std::time::Instant::now() >= self.next_reconnect {
+                    self.next_reconnect = std::time::Instant::now() + self.reconnect_delay;
+                    if let Some(mac) = self.config.last_device.clone() {
+                        self.refresh_devices_async().await;
+                        let back = self.devices.iter().any(|d| d.mac == mac && d.connected);
+                        if back {
+                            log::info!("device {mac} is back, attaching");
+                            self.connected_mac = Some(mac);
+                            self.conn_state = ConnState::Connecting;
+                            self.menu_dirty = true;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -585,11 +657,30 @@ impl AppCore {
         }
         self.engine = None;
         self.connected_mac = None;
+        let lost = error.is_some();
         self.conn_state = match error {
             Some(e) => ConnState::Error(e),
             None => ConnState::NotConnected,
         };
+        // A lost link re-arms automatic reconnection; a manual disconnect
+        // (or cancel) stops it.
+        if lost {
+            self.arm_reconnect();
+        } else {
+            self.reconnect = false;
+        }
         self.menu_dirty = true;
+    }
+
+    /// Arms passive reconnection if the user opted in: the app waits for the
+    /// headphone to come back (seen connected via BlueZ) instead of actively
+    /// retrying connections.
+    fn arm_reconnect(&mut self) {
+        if self.config.auto_connect && self.config.last_device.is_some() {
+            self.reconnect = true;
+            self.next_reconnect = std::time::Instant::now() + self.reconnect_delay;
+            self.menu_dirty = true;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -663,12 +754,16 @@ impl AppCore {
         match &self.conn_state {
             ConnState::NotConnected | ConnState::Error(_) => {
                 let header = match &self.conn_state {
-                    ConnState::Error(e) => format!("⚠️ {e}"),
+                    ConnState::Error(e) if !self.reconnect => format!("⚠️ {e}"),
+                    _ if self.reconnect => "🔄 Waiting for device…".to_string(),
                     _ => "🔌 Not connected".to_string(),
                 };
                 items.push(MenuItem::action(header));
                 items.push(MenuItem::separator());
                 items.push(self.build_connect_menu());
+                if self.reconnect {
+                    items.push(MenuItem::cmd("✖ Cancel auto-reconnect", UiCommand::Disconnect));
+                }
             }
             ConnState::Connecting => {
                 items.push(MenuItem::action("⏳ Connecting…"));
@@ -772,6 +867,11 @@ impl AppCore {
                 "Connection: BLE (GATT)",
                 self.transport_kind == TransportKind::Ble,
                 UiCommand::SetTransport(TransportKind::Ble),
+            ),
+            MenuItem::check(
+                "Auto-connect at startup",
+                self.config.auto_connect,
+                UiCommand::SetAutoConnect(!self.config.auto_connect),
             ),
             MenuItem::separator(),
         ];
@@ -1221,7 +1321,7 @@ mod tests {
     fn disconnected_menu_offers_connect_and_quit() {
         let lister: Arc<dyn DeviceLister> = Arc::new(StaticDeviceLister(vec![]));
         let factory: Arc<dyn TransportFactory> = Arc::new(MockFactory(Mutex::new(Vec::new())));
-        let app = AppCore::new(lister, factory);
+        let app = AppCore::new_with_config(lister, factory, crate::config::Config::default());
         let snap = app.snapshot();
         let labels: Vec<String> = flatten(&snap.menu).into_iter().map(|m| m.label).collect();
         assert!(labels.iter().any(|l| l.contains("Connect")));
@@ -1233,7 +1333,7 @@ mod tests {
     fn devices_appear_in_connect_menu() {
         let lister: Arc<dyn DeviceLister> = Arc::new(StaticDeviceLister(vec![]));
         let factory: Arc<dyn TransportFactory> = Arc::new(MockFactory(Mutex::new(Vec::new())));
-        let mut app = AppCore::new(lister, factory);
+        let mut app = AppCore::new_with_config(lister, factory, crate::config::Config::default());
         app.devices = vec![DeviceInfo {
             name: "WH-1000XM5".into(),
             mac: "AA:BB:CC:DD:EE:FF".into(),

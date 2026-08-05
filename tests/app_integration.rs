@@ -12,6 +12,18 @@ use sony_buds_tray_control::protocol::{DetectSensitivity, EqPresetId, ModeOutTim
 use sony_buds_tray_control::transport::discovery::{DeviceInfo, StaticDeviceLister};
 use sony_buds_tray_control::transport::TransportKind;
 
+fn test_config() -> sony_buds_tray_control::config::Config {
+    // Isolated config dir so tests never read or write the user's real
+    // settings (which would leak the mock MAC into the live app).
+    sony_buds_tray_control::config::Config::load_from(
+        std::env::temp_dir().join(format!(
+            "sony-buds-app-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("")
+        )),
+    )
+}
+
 fn harness() -> (AppCore, Arc<Mutex<Vec<MockDevice>>>) {
     let lister: Arc<dyn sony_buds_tray_control::transport::discovery::DeviceLister> =
         Arc::new(StaticDeviceLister(vec![DeviceInfo {
@@ -23,7 +35,10 @@ fn harness() -> (AppCore, Arc<Mutex<Vec<MockDevice>>>) {
     let devices: Arc<Mutex<Vec<MockDevice>>> = Arc::new(Mutex::new(Vec::new()));
     let factory: Arc<dyn sony_buds_tray_control::app::TransportFactory> =
         Arc::new(PairFactory(devices.clone()));
-    (AppCore::new(lister, factory), devices)
+    (
+        AppCore::new_with_config(lister, factory, test_config()),
+        devices,
+    )
 }
 
 /// Pumps the mock devices and the app loop until the exchange settles.
@@ -68,6 +83,114 @@ async fn pump_app(app: &mut AppCore, devices: &Arc<Mutex<Vec<MockDevice>>>) {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn auto_connect_connects_to_last_device_at_startup() {
+    let lister: Arc<dyn sony_buds_tray_control::transport::discovery::DeviceLister> =
+        Arc::new(StaticDeviceLister(vec![DeviceInfo {
+            name: "WH-1000XM5".into(),
+            mac: "AA:BB:CC:DD:EE:FF".into(),
+            paired: true,
+            connected: false,
+        }]));
+    let devices: Arc<Mutex<Vec<MockDevice>>> = Arc::new(Mutex::new(Vec::new()));
+    let factory: Arc<dyn sony_buds_tray_control::app::TransportFactory> =
+        Arc::new(PairFactory(devices.clone()));
+    let mut config = test_config();
+    config.auto_connect = true;
+    config.last_device = Some("AA:BB:CC:DD:EE:FF".into());
+    let mut app = AppCore::new_with_config(lister, factory, config);
+
+    // A single pump: refresh + auto-connect + full handshake.
+    pump_app(&mut app, &devices).await;
+    assert_eq!(app.conn_state, ConnState::Connected);
+
+    // Auto-connect must not fire again after a disconnect.
+    app.apply_command(UiCommand::Disconnect);
+    pump_app(&mut app, &devices).await;
+    assert_eq!(app.conn_state, ConnState::NotConnected);
+}
+
+#[tokio::test]
+async fn auto_reconnect_after_connection_loss() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Lister whose "connected" flag can be flipped to simulate the user
+    // reconnecting the headphone through the system Bluetooth UI.
+    struct ToggleLister {
+        device: DeviceInfo,
+        connected: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl sony_buds_tray_control::transport::discovery::DeviceLister for ToggleLister {
+        async fn list_devices(
+            &self,
+        ) -> Result<Vec<DeviceInfo>, sony_buds_tray_control::transport::TransportError> {
+            let mut d = self.device.clone();
+            d.connected = self.connected.load(Ordering::SeqCst);
+            Ok(vec![d])
+        }
+    }
+
+    let device_connected = Arc::new(AtomicBool::new(false));
+    let lister: Arc<dyn sony_buds_tray_control::transport::discovery::DeviceLister> =
+        Arc::new(ToggleLister {
+            device: DeviceInfo {
+                name: "WH-1000XM5".into(),
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+                paired: true,
+                connected: false,
+            },
+            connected: device_connected.clone(),
+        });
+    let devices: Arc<Mutex<Vec<MockDevice>>> = Arc::new(Mutex::new(Vec::new()));
+    let factory: Arc<dyn sony_buds_tray_control::app::TransportFactory> =
+        Arc::new(PairFactory(devices.clone()));
+    let mut config = test_config();
+    config.auto_connect = true;
+    config.last_device = Some("AA:BB:CC:DD:EE:FF".into());
+    let mut app = AppCore::new_with_config(lister, factory, config);
+    app.reconnect_delay = std::time::Duration::from_millis(50);
+
+    app.apply_command(UiCommand::Connect {
+        mac: "AA:BB:CC:DD:EE:FF".into(),
+    });
+    pump_app(&mut app, &devices).await;
+    assert_eq!(app.conn_state, ConnState::Connected);
+
+    // Simulate the headphone dropping off Bluetooth: dropping the mock
+    // device closes the transport pipe.
+    devices.lock().unwrap().clear();
+    pump_app(&mut app, &devices).await;
+    assert!(matches!(
+        app.conn_state,
+        ConnState::Error(_) | ConnState::NotConnected
+    ));
+    assert!(
+        app.snapshot().menu.iter().any(|m| m.label.contains("Waiting")),
+        "menu should show the waiting state"
+    );
+
+    // Device still away: no connection attempts, stays in wait mode.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    pump_app(&mut app, &devices).await;
+    assert!(!app.is_connected());
+    assert_eq!(devices.lock().unwrap().len(), 0, "no connect attempts while away");
+
+    // User reconnects via the system UI: the app attaches on its own.
+    device_connected.store(true, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    pump_app(&mut app, &devices).await;
+    assert_eq!(app.conn_state, ConnState::Connected);
+
+    // A manual disconnect cancels auto-reconnect.
+    app.apply_command(UiCommand::Disconnect);
+    pump_app(&mut app, &devices).await;
+    assert_eq!(app.conn_state, ConnState::NotConnected);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    pump_app(&mut app, &devices).await;
+    assert_eq!(app.conn_state, ConnState::NotConnected);
 }
 
 #[tokio::test]
