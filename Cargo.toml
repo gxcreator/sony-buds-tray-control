@@ -1,0 +1,29 @@
+[package]
+name = "sony-buds-tray-control"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight KDE system tray control for Sony headphones (MDR V2 protocol over Bluetooth)"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "io-util", "macros", "signal"] }
+bluer = { version = "0.17", features = ["bluetoothd", "rfcomm", "serde", "id"] }
+ksni = "0.3"
+libloading = "0.8"
+async-trait = "0.1"
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+futures = "0.3"
+
+[profile.release]
+lto = "thin"
+strip = true
+opt-level = 3
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
