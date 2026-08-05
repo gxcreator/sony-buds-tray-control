@@ -4,9 +4,15 @@ A lightweight KDE system tray control for Sony headphones with MDR V2 protocol.
 
 Reimplemented in rust based on  [SonyHeadphonesClient](https://github.com/mos9527/SonyHeadphonesClient)
 
-## Features
-Both transports used by the reference client are supported:
+Tested on WH-1000XM6 and WF-1000XM5
 
+<img src="image.png" alt="Sony Buds Tray Control screenshot" width="420" />
+
+## Features
+- Control almost all features supported by Android app from tray
+- Quickly switch NC mode by single click on tray icon
+
+Both transports used by the reference client are supported:
 - Classic Bluetooth via RFCOMM + SDP service discovery via `libbluetooth` and BLE GATT (TANDEM_OVER_BLE_HPC service via BlueZ D-Bus)
 
 ## Building
