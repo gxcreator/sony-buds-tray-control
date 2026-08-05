@@ -51,6 +51,7 @@ pub enum UiCommand {
     NextTrack,
     SetAmbientMode(AmbientSel),
     CycleAmbientMode,
+    SetAmbientLevel(u8),
     AmbientUp,
     AmbientDown,
     SetVoicePassthrough(bool),
@@ -325,6 +326,11 @@ impl AppCore {
                     if enable && mode == NcAsmMode::Asm && props.nc_asm_ambient_level.desired == 0 {
                         props.nc_asm_ambient_level.desired = 20;
                     }
+                }
+            }
+            SetAmbientLevel(v) => {
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.props.nc_asm_ambient_level.desired = v.clamp(1, 20);
                 }
             }
             AmbientUp => self.nudge_ambient(1),
@@ -673,8 +679,13 @@ impl AppCore {
                 let s = &engine.state;
                 let p = &engine.props;
                 items.push(MenuItem::action(format!(
-                    "🎧 {} — connected",
-                    model_name(s)
+                    "🎧 {}{}",
+                    model_name(s),
+                    if s.audio_codec == crate::protocol::AudioCodec::Unsettled {
+                        String::new()
+                    } else {
+                        format!(" · {}", s.audio_codec)
+                    }
                 )));
                 items.push(MenuItem::action(format!("🔋 {}", battery_line(s))));
                 if !s.play_title.is_empty() {
@@ -682,35 +693,31 @@ impl AppCore {
                 }
                 items.push(MenuItem::separator());
 
-                // Volume.
-                let vol_items = vec![
-                    MenuItem::cmd("−5", UiCommand::VolumeDown),
-                    MenuItem::action(format!("Volume: {} / 30", p.play_volume.current)),
-                    MenuItem::cmd("+5", UiCommand::VolumeUp),
-                ];
-                items.push(MenuItem::submenu("🔊 Volume", vol_items));
-
-                // Playback.
+                // Playback: transport controls + volume.
                 let play_label = match s.play_status {
-                    PlaybackStatus::Play => "Pause",
-                    _ => "Play",
+                    PlaybackStatus::Play => "⏸️Pause",
+                    _ => "▶️Play",
                 };
+                // Ambient sound.
+                if self.ambient_supported(engine) {
+                    items.push(MenuItem::submenu(
+                        "🍃 ANC",
+                        self.build_ambient_menu(engine),
+                    ));
+                }
                 items.push(MenuItem::submenu(
                     "⏯️ Playback",
                     vec![
                         MenuItem::cmd("⏮ Prev", UiCommand::PrevTrack),
                         MenuItem::cmd(play_label, UiCommand::PlayPause),
                         MenuItem::cmd("⏭ Next", UiCommand::NextTrack),
+                        MenuItem::separator(),
+                        MenuItem::cmd("−5", UiCommand::VolumeDown),
+                        MenuItem::action(format!("Volume: {} / 30", p.play_volume.current)),
+                        MenuItem::cmd("+5", UiCommand::VolumeUp),
                     ],
                 ));
 
-                // Ambient sound.
-                if self.ambient_supported(engine) {
-                    items.push(MenuItem::submenu(
-                        "🍃 Ambient Sound",
-                        self.build_ambient_menu(engine),
-                    ));
-                }
                 // Speak to Chat.
                 if self.stc_supported(engine) {
                     items.push(MenuItem::submenu(
@@ -744,7 +751,7 @@ impl AppCore {
                 items.push(MenuItem::separator());
                 items.push(MenuItem::cmd("🔌 Disconnect", UiCommand::Disconnect));
                 if engine.state.support.contains_t1(FunctionTable1::PowerOff) {
-                    items.push(MenuItem::cmd("⏻ Shutdown", UiCommand::Shutdown));
+                    items.push(MenuItem::cmd("⏻ Shutdown headphones", UiCommand::Shutdown));
                 }
             }
         }
@@ -827,9 +834,18 @@ impl AppCore {
                 UiCommand::SetAmbientMode(AmbientSel::Off),
             ),
             MenuItem::separator(),
-            MenuItem::cmd("Level −1", UiCommand::AmbientDown),
-            MenuItem::action(format!("Level: {}", p.nc_asm_ambient_level.current)),
-            MenuItem::cmd("Level +1", UiCommand::AmbientUp),
+            MenuItem::submenu(
+                "Ambient volume",
+                (1..=20)
+                    .map(|v| {
+                        MenuItem::radio(
+                            format!("{v}"),
+                            p.nc_asm_ambient_level.current == v,
+                            UiCommand::SetAmbientLevel(v),
+                        )
+                    })
+                    .collect(),
+            ),
             MenuItem::check(
                 "Voice passthrough",
                 p.nc_asm_focus_on_voice.current,
@@ -1010,23 +1026,25 @@ impl AppCore {
             ));
         }
         if s.has_table2 {
-            items.push(MenuItem::check(
-                "Voice guidance",
-                p.voice_guidance_enabled.current,
-                UiCommand::SetVoiceGuidance(!p.voice_guidance_enabled.current),
-            ));
             let has_volume = s.support.contains_t2(
                 FunctionTable2::VoiceGuidanceSettingMtkTransferWithoutDisconnectionSupportLanguageSwitchAndVolumeAdjustment,
             );
+            let mut vg = vec![MenuItem::check(
+                "Enabled",
+                p.voice_guidance_enabled.current,
+                UiCommand::SetVoiceGuidance(!p.voice_guidance_enabled.current),
+            )];
             if has_volume {
+                vg.push(MenuItem::separator());
                 for v in -2i8..=2 {
-                    items.push(MenuItem::radio(
-                        format!("Voice guidance volume: {v:+}"),
+                    vg.push(MenuItem::radio(
+                        format!("Volume: {v:+}"),
                         p.voice_guidance_volume.current == v,
                         UiCommand::SetVoiceGuidanceVolume(v),
                     ));
                 }
             }
+            items.push(MenuItem::submenu("Voice Guidance", vg));
         }
         if s.support.contains_t1(FunctionTable1::AssignableSetting) {
             items.push(MenuItem::submenu(
@@ -1036,17 +1054,15 @@ impl AppCore {
         }
         // General settings.
         if !s.gs_capabilities.is_empty() {
-            let mut gs = Vec::new();
             for (i, cap) in s.gs_capabilities.iter().enumerate() {
                 let subject = gs_subject(&cap.subject);
                 let checked = p.gs_param_bool.get(i).map(|x| x.current).unwrap_or(false);
-                gs.push(MenuItem::check(
+                items.push(MenuItem::check(
                     subject,
                     checked,
                     UiCommand::SetGeneralSetting(i, !checked),
                 ));
             }
-            items.push(MenuItem::submenu("General Settings", gs));
         }
         items
     }

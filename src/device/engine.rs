@@ -913,6 +913,12 @@ impl<T: Transport> Engine<T> {
             }
             CommandT1::PlayRetStatus | CommandT1::PlayNtfyStatus => {
                 if let Ok(p) = PlayStatusPlaybackController::deserialize(data) {
+                    log::debug!(
+                        "engine: playback status {:?} (raw {data:02X?}, status={:?}, music_call={:?})",
+                        p.playback_status,
+                        p.status,
+                        p.music_call_status
+                    );
                     self.state.play_status = p.playback_status;
                     Some(DeviceEvent::PlaybackStatus)
                 } else {
