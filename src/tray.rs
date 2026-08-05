@@ -3,6 +3,7 @@
 //! The tray is a thin presentation layer: it renders the [`UiSnapshot`]
 //! produced by the app core and forwards user actions back through a channel.
 
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use ksni::menu::{CheckmarkItem, MenuItem as KsniItem, StandardItem, SubMenu};
@@ -14,11 +15,16 @@ use crate::app::{ItemKind, MenuItem, UiCommand, UiSnapshot};
 pub struct Tray {
     shared: Arc<RwLock<UiSnapshot>>,
     tx: UnboundedSender<UiCommand>,
+    icon_theme_dir: PathBuf,
 }
 
 impl Tray {
     pub fn new(shared: Arc<RwLock<UiSnapshot>>, tx: UnboundedSender<UiCommand>) -> Self {
-        Self { shared, tx }
+        Self {
+            shared,
+            tx,
+            icon_theme_dir: ensure_icon_theme(),
+        }
     }
 }
 
@@ -31,11 +37,34 @@ impl TrayTrait for Tray {
         "Sony Buds Control".to_string()
     }
 
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // Single click cycles the noise cancelling / ambient sound mode.
+        let _ = self.tx.send(UiCommand::CycleAmbientMode);
+    }
+
+    fn icon_theme_path(&self) -> String {
+        self.icon_theme_dir.to_string_lossy().into_owned()
+    }
+
     fn icon_name(&self) -> String {
-        self.shared
-            .read()
-            .map(|s| s.icon_name.clone())
-            .unwrap_or_else(|_| "audio-headphones-symbolic".to_string())
+        // When connected, pick the SVG variant with the NC status dot baked
+        // in (green = NC, blue = ambient sound, grey = NC/ASM off); when
+        // idle, use our red-cross variant. Hosts resolve them from our
+        // IconThemePath.
+        let snap = self.shared.read().ok();
+        let connected = snap
+            .as_ref()
+            .map(|s| s.conn_state == crate::app::ConnState::Connected)
+            .unwrap_or(false);
+        if !connected {
+            return "sony-buds-disconnected".to_string();
+        }
+        match snap.map(|s| s.nc_dot).unwrap_or(crate::app::NcDot::Hidden) {
+            crate::app::NcDot::NoiseCancelling => "sony-buds-nc",
+            crate::app::NcDot::Ambient => "sony-buds-asm",
+            _ => "sony-buds-off",
+        }
+        .to_string()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
@@ -137,6 +166,45 @@ fn to_ksni(item: &MenuItem, tx: &UnboundedSender<UiCommand>) -> KsniItem<Tray> {
     }
 }
 
+/// Ensures the custom icon theme directory exists with the headphone SVG
+/// variants (one per NC state, plus the disconnected red-cross variant) and
+/// returns its path. Hosts resolve icons that are missing from the system
+/// theme via `IconThemePath/<name>.svg` (KIconLoader's "User" group
+/// fallback), so no index.theme is needed.
+fn ensure_icon_theme() -> PathBuf {
+    let dir = std::env::temp_dir()
+        .join("sony-buds-tray-control")
+        .join("icons");
+    let _ = std::fs::create_dir_all(&dir);
+    let variants = [
+        ("sony-buds-nc.svg", Some("#2EC853"), false),
+        ("sony-buds-asm.svg", Some("#2979FF"), false),
+        ("sony-buds-off.svg", Some("#9E9E9E"), false),
+        ("sony-buds-disconnected.svg", None, true),
+    ];
+    for (name, color, cross) in variants {
+        let _ = std::fs::write(dir.join(name), headphone_svg(color, cross));
+    }
+    dir
+}
+
+/// The headphone SVG (Breeze `audio-headphones` glyph) with an optional
+/// status dot in the bottom-right corner and/or a red "disconnected" cross.
+fn headphone_svg(dot: Option<&str>, cross: bool) -> String {
+    let dot = match dot {
+        Some(color) => format!(r#"<circle cx="19.2" cy="19.2" r="2.8" fill="{color}"/>"#),
+        None => String::new(),
+    };
+    let cross = if cross {
+        r##"<path d="M 16.7 16.7 L 21.7 21.7 M 21.7 16.7 L 16.7 21.7" stroke="#E53935" stroke-width="2.2" stroke-linecap="round"/>"##.to_string()
+    } else {
+        String::new()
+    };
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22"><path fill="#ffffff" d="M 11 3 A 8 8 0 0 0 3 11 L 3 19 L 4 19 L 4 17 L 6 19 L 7 19 L 7 13 L 6 13 L 4 15 L 4 11 A 7 7 0 0 1 11 4 A 7 7 0 0 1 18 11 L 18 15 L 16 13 L 15 13 L 15 19 L 16 19 L 18 17 L 18 19 L 19 19 L 19 11 A 8 8 0 0 0 11 3 z"/>{cross}{dot}</svg>"##
+    )
+}
+
 /// Spawns the tray service and keeps it alive forever (or until the host
 /// closes the item).
 pub async fn run(
@@ -165,4 +233,37 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svg_variants_are_valid() {
+        let with_dot = headphone_svg(Some("#2EC853"), false);
+        let without = headphone_svg(None, false);
+        assert!(with_dot.starts_with("<svg"));
+        assert!(with_dot.ends_with("</svg>"));
+        assert!(with_dot.contains("viewBox"));
+        assert!(with_dot.contains("<circle"));
+        assert!(!without.contains("<circle"));
+    }
+
+    #[test]
+    fn disconnected_svg_has_red_cross() {
+        let s = headphone_svg(None, true);
+        assert!(s.contains("stroke=\"#E53935\""));
+        assert!(s.contains("M 16.7 16.7 L 21.7 21.7"));
+        assert!(!s.contains("<circle"));
+    }
+
+    #[test]
+    fn icon_theme_dir_contains_variants() {
+        let dir = ensure_icon_theme();
+        assert!(dir.join("sony-buds-nc.svg").exists());
+        assert!(dir.join("sony-buds-asm.svg").exists());
+        assert!(dir.join("sony-buds-off.svg").exists());
+        assert!(dir.join("sony-buds-disconnected.svg").exists());
+    }
 }

@@ -48,8 +48,9 @@ async fn run_app() -> anyhow::Result<()> {
         conn_state: sony_buds_tray_control::app::ConnState::NotConnected,
         menu: Vec::new(),
         tooltip: "Sony Buds Control".to_string(),
-        icon_name: "audio-headphones-symbolic".to_string(),
+        icon_name: "sony-buds-disconnected".to_string(),
         title: "Sony Buds Control".to_string(),
+        nc_dot: sony_buds_tray_control::app::NcDot::Hidden,
     }));
 
     // App core task: handles commands and drives the device engine.

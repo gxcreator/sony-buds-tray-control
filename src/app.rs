@@ -21,6 +21,19 @@ pub enum AmbientSel {
     Off,
 }
 
+/// Status dot overlaid on the tray icon, reflecting the NC/ASM state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NcDot {
+    /// Disconnected or unknown — no overlay dot.
+    Hidden,
+    /// Noise cancelling on — green.
+    NoiseCancelling,
+    /// Ambient sound on — blue.
+    Ambient,
+    /// NC/ASM off — grey.
+    Off,
+}
+
 /// Every user action reachable from the tray menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiCommand {
@@ -37,6 +50,7 @@ pub enum UiCommand {
     PrevTrack,
     NextTrack,
     SetAmbientMode(AmbientSel),
+    CycleAmbientMode,
     AmbientUp,
     AmbientDown,
     SetVoicePassthrough(bool),
@@ -147,6 +161,8 @@ pub struct UiSnapshot {
     pub tooltip: String,
     pub icon_name: String,
     pub title: String,
+    /// Status dot color for the tray icon overlay.
+    pub nc_dot: NcDot,
 }
 
 /// Creates concrete transports. Injected so tests can substitute the mock.
@@ -287,6 +303,26 @@ impl AppCore {
                         AmbientSel::Off => NcAsmMode::Nc,
                     };
                     if mode == AmbientSel::Asm && props.nc_asm_ambient_level.desired == 0 {
+                        props.nc_asm_ambient_level.desired = 20;
+                    }
+                }
+            }
+            CycleAmbientMode => {
+                let ambient = self
+                    .engine
+                    .as_ref()
+                    .map(|e| self.ambient_supported(e))
+                    .unwrap_or(false);
+                if let Some(engine) = self.engine.as_mut() {
+                    let props = &mut engine.props;
+                    let (enable, mode) = cycle_ambient(
+                        ambient,
+                        props.nc_asm_enabled.current,
+                        props.nc_asm_mode.current,
+                    );
+                    props.nc_asm_enabled.desired = enable;
+                    props.nc_asm_mode.desired = mode;
+                    if enable && mode == NcAsmMode::Asm && props.nc_asm_ambient_level.desired == 0 {
                         props.nc_asm_ambient_level.desired = 20;
                     }
                 }
@@ -558,18 +594,33 @@ impl AppCore {
         let conn_state = self.conn_state.clone();
         let menu = self.build_menu();
         let (title, tooltip, icon_name) = self.tray_info();
+        let nc_dot = match &self.conn_state {
+            ConnState::Connected => {
+                let props = &self.engine.as_ref().expect("connected").props;
+                if !props.nc_asm_enabled.current {
+                    NcDot::Off
+                } else {
+                    match props.nc_asm_mode.current {
+                        NcAsmMode::Asm => NcDot::Ambient,
+                        _ => NcDot::NoiseCancelling,
+                    }
+                }
+            }
+            _ => NcDot::Hidden,
+        };
         UiSnapshot {
             conn_state,
             menu,
             tooltip,
             icon_name,
             title,
+            nc_dot,
         }
     }
 
     fn tray_info(&self) -> (String, String, String) {
         let title = "Sony Buds Control".to_string();
-        let icon = "audio-headphones-symbolic".to_string();
+        let icon = "sony-buds-disconnected".to_string();
         let tooltip = match &self.conn_state {
             ConnState::NotConnected => "Sony Buds — not connected".to_string(),
             ConnState::Connecting => "Sony Buds — connecting…".to_string(),
@@ -605,20 +656,27 @@ impl AppCore {
         let mut items = Vec::new();
         match &self.conn_state {
             ConnState::NotConnected | ConnState::Error(_) => {
-                items.push(MenuItem::action(self.conn_state_str()));
+                let header = match &self.conn_state {
+                    ConnState::Error(e) => format!("⚠️ {e}"),
+                    _ => "🔌 Not connected".to_string(),
+                };
+                items.push(MenuItem::action(header));
                 items.push(MenuItem::separator());
                 items.push(self.build_connect_menu());
             }
             ConnState::Connecting => {
-                items.push(MenuItem::action("Connecting…"));
-                items.push(MenuItem::cmd("Cancel", UiCommand::Disconnect));
+                items.push(MenuItem::action("⏳ Connecting…"));
+                items.push(MenuItem::cmd("✖ Cancel", UiCommand::Disconnect));
             }
             ConnState::Connected => {
                 let engine = self.engine.as_ref().expect("connected");
                 let s = &engine.state;
                 let p = &engine.props;
-                items.push(MenuItem::action(format!("{} — connected", model_name(s))));
-                items.push(MenuItem::action(battery_line(s)));
+                items.push(MenuItem::action(format!(
+                    "🎧 {} — connected",
+                    model_name(s)
+                )));
+                items.push(MenuItem::action(format!("🔋 {}", battery_line(s))));
                 if !s.play_title.is_empty() {
                     items.push(MenuItem::action(now_playing_line(s)));
                 }
@@ -630,7 +688,7 @@ impl AppCore {
                     MenuItem::action(format!("Volume: {} / 30", p.play_volume.current)),
                     MenuItem::cmd("+5", UiCommand::VolumeUp),
                 ];
-                items.push(MenuItem::submenu("Volume", vol_items));
+                items.push(MenuItem::submenu("🔊 Volume", vol_items));
 
                 // Playback.
                 let play_label = match s.play_status {
@@ -638,7 +696,7 @@ impl AppCore {
                     _ => "Play",
                 };
                 items.push(MenuItem::submenu(
-                    "Playback",
+                    "⏯️ Playback",
                     vec![
                         MenuItem::cmd("⏮ Prev", UiCommand::PrevTrack),
                         MenuItem::cmd(play_label, UiCommand::PlayPause),
@@ -649,28 +707,28 @@ impl AppCore {
                 // Ambient sound.
                 if self.ambient_supported(engine) {
                     items.push(MenuItem::submenu(
-                        "Ambient Sound",
+                        "🍃 Ambient Sound",
                         self.build_ambient_menu(engine),
                     ));
                 }
                 // Speak to Chat.
                 if self.stc_supported(engine) {
                     items.push(MenuItem::submenu(
-                        "Speak to Chat",
+                        "💬 Speak to Chat",
                         self.build_stc_menu(engine),
                     ));
                 }
                 // EQ & DSEE.
-                items.push(MenuItem::submenu("Equalizer", self.build_eq_menu(engine)));
+                items.push(MenuItem::submenu("🎚️ Equalizer", self.build_eq_menu(engine)));
                 // System settings.
                 items.push(MenuItem::submenu(
-                    "Settings",
+                    "⚙️ Settings",
                     self.build_settings_menu(engine),
                 ));
 
                 items.push(MenuItem::separator());
                 items.push(MenuItem::submenu(
-                    "About",
+                    "ℹ️ About",
                     vec![
                         MenuItem::action(format!("Model: {}", model_name(s))),
                         MenuItem::action(format!("Firmware: {}", s.fw_version)),
@@ -682,15 +740,15 @@ impl AppCore {
                         },
                     ],
                 ));
-                items.push(MenuItem::cmd("Refresh", UiCommand::RefreshSync));
+                items.push(MenuItem::cmd("🔄 Refresh", UiCommand::RefreshSync));
                 items.push(MenuItem::separator());
-                items.push(MenuItem::cmd("Disconnect", UiCommand::Disconnect));
+                items.push(MenuItem::cmd("🔌 Disconnect", UiCommand::Disconnect));
                 if engine.state.support.contains_t1(FunctionTable1::PowerOff) {
-                    items.push(MenuItem::cmd("Shutdown", UiCommand::Shutdown));
+                    items.push(MenuItem::cmd("⏻ Shutdown", UiCommand::Shutdown));
                 }
             }
         }
-        items.push(MenuItem::cmd("Quit", UiCommand::Quit));
+        items.push(MenuItem::cmd("🚪 Quit", UiCommand::Quit));
         items
     }
 
@@ -726,7 +784,7 @@ impl AppCore {
                 ));
             }
         }
-        MenuItem::submenu("Connect", items)
+        MenuItem::submenu("🔌 Connect", items)
     }
 
     fn ambient_supported(&self, engine: &Engine<Box<dyn Transport>>) -> bool {
@@ -1029,6 +1087,26 @@ impl AppCore {
     }
 }
 
+/// Cycles the NC/ambient mode one step forward: NC → Ambient Sound → Off →
+/// NC. Devices without ambient sound support just toggle NC on/off.
+fn cycle_ambient(
+    ambient_supported: bool,
+    enabled: bool,
+    mode: NcAsmMode,
+) -> (bool, NcAsmMode) {
+    if ambient_supported {
+        match (enabled, mode) {
+            (true, NcAsmMode::Nc) => (true, NcAsmMode::Asm),
+            (true, _) => (false, NcAsmMode::Nc),
+            (false, _) => (true, NcAsmMode::Nc),
+        }
+    } else if enabled {
+        (false, NcAsmMode::Nc)
+    } else {
+        (true, NcAsmMode::Nc)
+    }
+}
+
 fn model_name(s: &crate::device::DeviceState) -> &str {
     if s.model_name.is_empty() {
         "Headphones"
@@ -1070,10 +1148,10 @@ fn battery_line(s: &crate::device::DeviceState) -> String {
 fn now_playing_line(s: &crate::device::DeviceState) -> String {
     match (s.play_title.as_str(), s.play_artist.as_str()) {
         (title, artist) if !title.is_empty() && !artist.is_empty() => {
-            format!("♪ {title} — {artist}")
+            format!("🎵 {title} — {artist}")
         }
-        (title, _) if !title.is_empty() => format!("♪ {title}"),
-        _ => "♪".to_string(),
+        (title, _) if !title.is_empty() => format!("🎵 {title}"),
+        _ => "🎵".to_string(),
     }
 }
 
@@ -1131,7 +1209,7 @@ mod tests {
         let snap = app.snapshot();
         let labels: Vec<String> = flatten(&snap.menu).into_iter().map(|m| m.label).collect();
         assert!(labels.iter().any(|l| l.contains("Connect")));
-        assert!(labels.iter().any(|l| l == "Quit"));
+        assert!(labels.iter().any(|l| l.contains("Quit")));
         assert!(labels.iter().any(|l| l == "No devices found"));
     }
 
@@ -1149,6 +1227,17 @@ mod tests {
         let snap = app.snapshot();
         let labels: Vec<String> = flatten(&snap.menu).into_iter().map(|m| m.label).collect();
         assert!(labels.iter().any(|l| l.contains("WH-1000XM5")));
+    }
+
+    #[test]
+    fn cycle_ambient_cycles_nc_asm_off() {
+        use NcAsmMode::*;
+        assert_eq!(cycle_ambient(true, true, Nc), (true, Asm));
+        assert_eq!(cycle_ambient(true, true, Asm), (false, Nc));
+        assert_eq!(cycle_ambient(true, false, Nc), (true, Nc));
+        assert_eq!(cycle_ambient(true, false, Asm), (true, Nc));
+        assert_eq!(cycle_ambient(false, true, Nc), (false, Nc));
+        assert_eq!(cycle_ambient(false, false, Nc), (true, Nc));
     }
 
     fn flatten(items: &[MenuItem]) -> Vec<MenuItem> {
