@@ -1010,6 +1010,7 @@ impl AppCore {
         let s = &engine.state.support;
         s.contains_t2(F2::PairingDeviceManagementClassicBt)
             || s.contains_t2(F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt)
+            || s.contains_t2(F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicLe)
     }
 
     fn build_multipoint_menu(&self, engine: &Engine<Box<dyn Transport>>) -> Vec<MenuItem> {
@@ -1025,12 +1026,12 @@ impl AppCore {
                 } else {
                     format!("{} ({})", d.name, d.address)
                 };
-                let label = if !d.connected && !is_playback {
+                let label = if !d.connected() && !is_playback {
                     format!("{label} · paired")
                 } else {
                     label
                 };
-                let cmd = if d.connected {
+                let cmd = if d.connected() {
                     UiCommand::MultipointSwitch {
                         address: d.address.clone(),
                     }

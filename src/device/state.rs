@@ -112,7 +112,14 @@ pub struct GsCapability {
 pub struct MultipointDevice {
     pub address: String,
     pub name: String,
-    pub connected: bool,
+    /// Connection slot status byte; non-zero means connected.
+    pub connected_status: u8,
+}
+
+impl MultipointDevice {
+    pub fn connected(&self) -> bool {
+        self.connected_status != 0
+    }
 }
 
 /// A one-shot device management request (multipoint).

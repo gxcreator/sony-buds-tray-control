@@ -193,8 +193,9 @@ enum Step {
     /// Run `steps` only if the table-1 function is supported (known after
     /// the support-function frame arrives).
     IfSupport1(FunctionTable1, Vec<Step>),
-    /// Run `steps` only if the table-2 function is supported.
-    IfSupport2(FunctionTable2, Vec<Step>),
+    /// Run `steps` only if any of the table-2 functions is supported (known
+    /// after the support-function frame arrives).
+    IfSupport2Any(Vec<FunctionTable2>, Vec<Step>),
     /// Resolve the NC/ASM inquired type from the advertised support.
     NcAsmQuery,
     /// Task completed; emit `event`.
@@ -377,7 +378,7 @@ impl<T: Transport> Engine<T> {
                     Step::Await(wait) => Next::Await(*wait),
                     Step::IfTable2(_)
                     | Step::IfSupport1(_, _)
-                    | Step::IfSupport2(_, _)
+                    | Step::IfSupport2Any(_, _)
                     | Step::NcAsmQuery => Next::Conditional,
                     Step::Done(_) => Next::Done,
                 }
@@ -419,8 +420,8 @@ impl<T: Transport> Engine<T> {
                                 continue;
                             }
                         }
-                        Step::IfSupport2(func, inner) => {
-                            if self.state.support.contains_t2(func) {
+                        Step::IfSupport2Any(funcs, inner) => {
+                            if funcs.iter().any(|f| self.state.support.contains_t2(*f)) {
                                 inner
                             } else {
                                 continue;
@@ -1216,8 +1217,10 @@ impl<T: Transport> Engine<T> {
         }
     }
 
-    /// Adopts a fresh multipoint device list, mapping the playback index
-    /// into the new list.
+    /// Adopts a fresh multipoint device list. The playback device is the one
+    /// whose connection-slot status matches the reported `playback_device`
+    /// byte (mirroring the reference client, which compares
+    /// `connectedStatus == playbackDevice` rather than indexing the list).
     fn apply_multipoint_list(&mut self, p: PeripheralRetParamDeviceList) {
         self.state.multipoint_devices = p
             .devices
@@ -1225,15 +1228,14 @@ impl<T: Transport> Engine<T> {
             .map(|d| MultipointDevice {
                 address: d.address,
                 name: d.name,
-                connected: d.connected,
+                connected_status: d.connected_status,
             })
             .collect();
-        let idx = p.playback_device as usize;
-        self.state.multipoint_playback = if idx < self.state.multipoint_devices.len() {
-            Some(idx)
-        } else {
-            None
-        };
+        self.state.multipoint_playback = self
+            .state
+            .multipoint_devices
+            .iter()
+            .position(|d| d.connected_status == p.playback_device);
         log::debug!(
             "engine: multipoint list ({} device(s), playback #{:?})",
             self.state.multipoint_devices.len(),
@@ -1321,8 +1323,11 @@ fn build_init_steps(state: &DeviceState) -> Vec<Step> {
     // Multipoint: paired/connected device list. Both variants are queried
     // when advertised (the class-of-device one takes precedence on the
     // device side, mirroring `RequestInitV2` in the reference client).
-    steps.push(Step::IfSupport2(
-        F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt,
+    steps.push(Step::IfSupport2Any(
+        vec![
+            F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt,
+            F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicLe,
+        ],
         vec![Step::send_t2(
             PeripheralGetParam {
                 type_: PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice,
@@ -1330,8 +1335,8 @@ fn build_init_steps(state: &DeviceState) -> Vec<Step> {
             .serialize(),
         )],
     ));
-    steps.push(Step::IfSupport2(
-        F2::PairingDeviceManagementClassicBt,
+    steps.push(Step::IfSupport2Any(
+        vec![F2::PairingDeviceManagementClassicBt],
         vec![Step::send_t2(
             PeripheralGetParam {
                 type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
@@ -1614,8 +1619,11 @@ fn build_sync_steps(state: &DeviceState) -> Vec<Step> {
 
     // Multipoint device list refresh (both advertised variants; the second
     // overwrites the first with the same data plus the class-of-device field).
-    steps.push(Step::IfSupport2(
-        F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt,
+    steps.push(Step::IfSupport2Any(
+        vec![
+            F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt,
+            F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicLe,
+        ],
         vec![Step::send_t2(
             PeripheralGetParam {
                 type_: PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice,
@@ -1623,8 +1631,8 @@ fn build_sync_steps(state: &DeviceState) -> Vec<Step> {
             .serialize(),
         )],
     ));
-    steps.push(Step::IfSupport2(
-        F2::PairingDeviceManagementClassicBt,
+    steps.push(Step::IfSupport2Any(
+        vec![F2::PairingDeviceManagementClassicBt],
         vec![Step::send_t2(
             PeripheralGetParam {
                 type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,

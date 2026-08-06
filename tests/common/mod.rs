@@ -41,8 +41,10 @@ pub struct DeviceSimState {
     pub bgm_room: RoomSize,
     pub cinema: bool,
     /// Multipoint devices: (address, name, connected).
-    pub multipoint_devices: Vec<(String, String, bool)>,
-    /// Index into `multipoint_devices` of the playback device.
+    pub multipoint_devices: Vec<(String, String, u8)>,
+
+    /// Connection-slot value of the playback device (matched against each
+    /// device's connected status byte, not a list index).
     pub multipoint_playback: u8,
 }
 
@@ -81,10 +83,10 @@ impl Default for DeviceSimState {
             bgm_room: RoomSize::Small,
             cinema: false,
             multipoint_devices: vec![
-                ("AA:11:22:33:44:55".into(), "My Phone".into(), true),
-                ("BB:11:22:33:44:55".into(), "Laptop".into(), false),
+                ("AA:11:22:33:44:55".into(), "My Phone".into(), 1u8),
+                ("BB:11:22:33:44:55".into(), "Laptop".into(), 0u8),
             ],
-            multipoint_playback: 0,
+            multipoint_playback: 1,
         }
     }
 }
@@ -134,7 +136,7 @@ impl DeviceProfile {
         use FunctionTable2 as F2;
         let t2 = [F2::VoiceGuidanceSettingMtkTransferWithoutDisconnectionSupportLanguageSwitchAndVolumeAdjustment,
             F2::PairingDeviceManagementClassicBt,
-            F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt];
+            F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicLe];
         Self {
             has_table2: true,
             nc_asm_type: NcAsmInquiredType::AsmSeamless,
@@ -954,7 +956,7 @@ impl MockDevice {
                             .iter()
                             .map(|(a, n, c)| PeripheralDeviceInfo {
                                 address: a.clone(),
-                                connected: *c,
+                                connected_status: *c,
                                 name: n.clone(),
                                 class_of_device: Some(0x5A020C),
                             })
@@ -974,7 +976,7 @@ impl MockDevice {
                             .iter()
                             .position(|(a, _, _)| a == &p.address)
                         {
-                            self.state.multipoint_playback = i as u8;
+                            self.state.multipoint_playback = self.state.multipoint_devices[i].2;
                             out.push((
                                 DataType::DataMdrNo2,
                                 PeripheralNotifyExtendedParamSourceSwitch {
@@ -988,13 +990,23 @@ impl MockDevice {
                 } else if let Ok(p) = PeripheralSetExtendedParamDeviceManagement::deserialize(data)
                 {
                     if p.action == ConnectivityActionType::Connect {
-                        if let Some(d) = self
+                        let idx = self
                             .state
                             .multipoint_devices
-                            .iter_mut()
-                            .find(|(a, _, _)| a == &p.address)
-                        {
-                            d.2 = true;
+                            .iter()
+                            .position(|(a, _, _)| a == &p.address);
+                        if let Some(i) = idx {
+                            let next = if self
+                                .state
+                                .multipoint_devices
+                                .iter()
+                                .any(|(_, _, s)| *s != 0)
+                            {
+                                2
+                            } else {
+                                1
+                            };
+                            self.state.multipoint_devices[i].2 = next;
                             out.push((
                                 DataType::DataMdrNo2,
                                 PeripheralNotifyExtendedParamDeviceManagement {

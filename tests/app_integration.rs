@@ -345,7 +345,7 @@ async fn multipoint_menu_lists_devices_and_switches_playback() {
         let device = devs.first().expect("device created");
         device.state.multipoint_devices[1].2
     };
-    assert!(laptop_connected, "laptop connected");
+    assert!(laptop_connected != 0, "laptop connected");
 
     // With the laptop connected, the row now switches playback to it.
     let snap = app.snapshot();
@@ -368,10 +368,10 @@ async fn multipoint_menu_lists_devices_and_switches_playback() {
     };
     app.apply_command(cmd);
     pump_app(&mut app, &devices).await;
-    // The device confirmed the switch and the radio moved.
+    // The device confirmed the switch: playback slot is now the laptop's.
     let devs = devices.lock().unwrap();
     let device = devs.first().expect("device created");
-    assert_eq!(device.state.multipoint_playback, 1);
+    assert_eq!(device.state.multipoint_playback, 2);
     drop(devs);
 
     let snap = app.snapshot();

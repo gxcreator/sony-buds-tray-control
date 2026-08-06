@@ -1402,7 +1402,9 @@ fn mac_string(bytes: &[u8]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeripheralDeviceInfo {
     pub address: String,
-    pub connected: bool,
+    /// Connection slot status byte; non-zero means connected. The playback
+    /// device is the one whose status equals `playback_device`.
+    pub connected_status: u8,
     pub name: String,
     /// Bluetooth class of device (only present in the type-0x02 variant).
     pub class_of_device: Option<u32>,
@@ -1411,7 +1413,7 @@ pub struct PeripheralDeviceInfo {
 impl PeripheralDeviceInfo {
     fn write_to(&self, w: &mut Writer, with_class: bool) -> SerResult<()> {
         w.bytes(&mac_bytes(&self.address))?;
-        w.u8(self.connected as u8)?;
+        w.u8(self.connected_status)?;
         if with_class {
             let class = self.class_of_device.unwrap_or(0xFF_FFFF);
             w.u8((class >> 16) as u8)?;
@@ -1423,7 +1425,7 @@ impl PeripheralDeviceInfo {
 
     fn read_from(r: &mut Reader<'_>, with_class: bool) -> SerResult<Self> {
         let address = mac_string(r.take(MAC_LEN)?);
-        let connected = r.u8()? != 0;
+        let connected_status = r.u8()?;
         let class_of_device = if with_class {
             let b = r.take(3)?;
             Some(u32::from_be_bytes([0, b[0], b[1], b[2]]))
@@ -1432,7 +1434,7 @@ impl PeripheralDeviceInfo {
         };
         Ok(Self {
             address,
-            connected,
+            connected_status,
             name: read_prefixed_string(r)?,
             class_of_device,
         })
@@ -1940,13 +1942,13 @@ mod tests {
             devices: vec![
                 PeripheralDeviceInfo {
                     address: "AA:BB:CC:DD:EE:FF".into(),
-                    connected: true,
+                    connected_status: 1,
                     name: "My Phone".into(),
                     class_of_device: None,
                 },
                 PeripheralDeviceInfo {
                     address: "11:22:33:44:55:66".into(),
-                    connected: false,
+                    connected_status: 0,
                     name: String::new(),
                     class_of_device: None,
                 },
@@ -1957,7 +1959,7 @@ mod tests {
             type_: PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice,
             devices: vec![PeripheralDeviceInfo {
                 address: "AA:BB:CC:DD:EE:FF".into(),
-                connected: true,
+                connected_status: 1,
                 name: "My Phone".into(),
                 class_of_device: Some(0x5A020C),
             }],
@@ -1997,17 +1999,21 @@ mod tests {
         payload.extend_from_slice(b"A4:A4:90:72:30:7D");
         payload.extend_from_slice(&[0x02, 0x5A, 0x02, 0x0C, 0x05]);
         payload.extend_from_slice(b"Phone");
-        payload.push(0x01); // playback device = index 1
+        payload.push(0x01); // playback_device = connection slot 1 (the PC)
         let list = PeripheralRetParamDeviceList::deserialize(&payload).expect("parses");
-        assert_eq!(list.type_, PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice);
+        assert_eq!(
+            list.type_,
+            PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice
+        );
         assert_eq!(list.devices.len(), 2);
         assert_eq!(list.devices[0].address, "FC:70:2E:B6:5A:92");
-        assert!(list.devices[0].connected);
+        assert_eq!(list.devices[0].connected_status, 0x01);
         assert_eq!(list.devices[0].name, "cachyos-x8664");
         assert_eq!(list.devices[0].class_of_device, Some(0x6C0104));
         assert_eq!(list.devices[1].address, "A4:A4:90:72:30:7D");
+        assert_eq!(list.devices[1].connected_status, 0x02);
         assert_eq!(list.devices[1].name, "Phone");
-        assert_eq!(list.playback_device, 1);
+        assert_eq!(list.playback_device, 0x01);
     }
 
     #[test]
@@ -2065,7 +2071,7 @@ mod tests {
                 type_: PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice,
                 devices: vec![PeripheralDeviceInfo {
                     address: "11:22:33:44:55:66".into(),
-                    connected: true,
+                    connected_status: 1,
                     name: "My Phone".into(),
                     class_of_device: Some(0x5A020C),
                 }],
