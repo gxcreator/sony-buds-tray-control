@@ -1021,16 +1021,18 @@ impl AppCore {
         } else {
             for (i, d) in s.multipoint_devices.iter().enumerate() {
                 let is_playback = s.multipoint_playback == Some(i);
-                let label = if d.name.is_empty() {
+                let mut label = if d.name.is_empty() {
                     d.address.clone()
                 } else {
                     format!("{} ({})", d.name, d.address)
                 };
-                let label = if !d.connected() && !is_playback {
-                    format!("{label} · paired")
+                if is_playback {
+                    label = format!("🔊🔗 {label}");
+                } else if d.connected() {
+                    label = format!("　🔗 {label}");
                 } else {
-                    label
-                };
+                    label = format!("　　{label} · paired");
+                }
                 let cmd = if d.connected() {
                     UiCommand::MultipointSwitch {
                         address: d.address.clone(),
@@ -1040,7 +1042,7 @@ impl AppCore {
                         address: d.address.clone(),
                     }
                 };
-                items.push(MenuItem::radio(label, is_playback, cmd));
+                items.push(MenuItem::cmd(label, cmd));
             }
         }
         items.push(MenuItem::separator());

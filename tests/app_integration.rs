@@ -313,6 +313,8 @@ async fn multipoint_menu_lists_devices_and_switches_playback() {
         ItemKind::Submenu(c) => c,
         _ => panic!("expected submenu"),
     };
+    // The playback device is marked with a speaker, connected devices with
+    // a link icon, disconnected ones as paired.
     let phone = children
         .iter()
         .find(|i| i.label.contains("My Phone"))
@@ -321,21 +323,21 @@ async fn multipoint_menu_lists_devices_and_switches_playback() {
         .iter()
         .find(|i| i.label.contains("Laptop"))
         .expect("laptop row");
-    match &phone.kind {
-        ItemKind::Radio { checked, .. } => assert!(*checked, "phone is the playback device"),
-        _ => panic!("expected radio item"),
-    }
-    match &laptop.kind {
-        ItemKind::Radio { checked, .. } => assert!(!*checked, "laptop is not playing"),
-        _ => panic!("expected radio item"),
-    }
-    // The disconnected device is marked as paired.
-    assert!(children.iter().any(|i| i.label.contains("· paired")));
+    assert!(
+        phone.label.starts_with("🔊🔗"),
+        "phone is the playback device: {}",
+        phone.label
+    );
+    assert!(
+        laptop.label.contains("· paired"),
+        "laptop is marked as paired: {}",
+        laptop.label
+    );
 
     // The paired laptop is not connected: clicking it connects it.
     let cmd = match &laptop.kind {
-        ItemKind::Radio { cmd, .. } => cmd.clone(),
-        _ => unreachable!(),
+        ItemKind::Action(Some(cmd)) => cmd.clone(),
+        _ => panic!("expected action item"),
     };
     app.apply_command(cmd);
     app.apply_command(UiCommand::RefreshSync);
@@ -363,8 +365,8 @@ async fn multipoint_menu_lists_devices_and_switches_playback() {
         .find(|i| i.label.contains("Laptop"))
         .expect("laptop row");
     let cmd = match &laptop.kind {
-        ItemKind::Radio { cmd, .. } => cmd.clone(),
-        _ => unreachable!(),
+        ItemKind::Action(Some(cmd)) => cmd.clone(),
+        _ => panic!("expected action item"),
     };
     app.apply_command(cmd);
     pump_app(&mut app, &devices).await;
@@ -388,10 +390,11 @@ async fn multipoint_menu_lists_devices_and_switches_playback() {
         .iter()
         .find(|i| i.label.contains("Laptop"))
         .expect("laptop row");
-    match &laptop.kind {
-        ItemKind::Radio { checked, .. } => assert!(*checked, "laptop is now the playback device"),
-        _ => panic!("expected radio item"),
-    }
+    assert!(
+        laptop.label.starts_with("🔊"),
+        "laptop is now the playback device: {}",
+        laptop.label
+    );
 }
 
 #[tokio::test]
