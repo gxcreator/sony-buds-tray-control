@@ -20,10 +20,10 @@ thiserror = "2"
 futures = "0.3"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
 strip = true
-opt-level = 3
-
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 
