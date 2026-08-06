@@ -17,7 +17,7 @@ use crate::protocol::codec;
 use crate::protocol::*;
 use crate::transport::{PollStatus, Transport, TransportError};
 
-use super::state::{DeviceState, Properties};
+use super::state::{DeviceState, MultipointDevice, MultipointRequest, Properties};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often a step's command is retransmitted on timeout before the task
@@ -85,6 +85,8 @@ pub enum DeviceEvent {
     ListeningMode,
     /// General settings changed.
     GeneralSetting,
+    /// Multipoint device list / playback device changed.
+    Multipoint,
     /// An alert message from the device.
     Alert(AlertMessageType),
     /// Fatal: the engine is unusable; the connection must be dropped.
@@ -191,6 +193,8 @@ enum Step {
     /// Run `steps` only if the table-1 function is supported (known after
     /// the support-function frame arrives).
     IfSupport1(FunctionTable1, Vec<Step>),
+    /// Run `steps` only if the table-2 function is supported.
+    IfSupport2(FunctionTable2, Vec<Step>),
     /// Resolve the NC/ASM inquired type from the advertised support.
     NcAsmQuery,
     /// Task completed; emit `event`.
@@ -371,9 +375,10 @@ impl<T: Transport> Engine<T> {
                         ..
                     } => Next::Send(payload.clone(), *data_type, *wait),
                     Step::Await(wait) => Next::Await(*wait),
-                    Step::IfTable2(_) | Step::IfSupport1(_, _) | Step::NcAsmQuery => {
-                        Next::Conditional
-                    }
+                    Step::IfTable2(_)
+                    | Step::IfSupport1(_, _)
+                    | Step::IfSupport2(_, _)
+                    | Step::NcAsmQuery => Next::Conditional,
                     Step::Done(_) => Next::Done,
                 }
             };
@@ -409,6 +414,13 @@ impl<T: Transport> Engine<T> {
                         }
                         Step::IfSupport1(func, inner) => {
                             if self.state.support.contains_t1(func) {
+                                inner
+                            } else {
+                                continue;
+                            }
+                        }
+                        Step::IfSupport2(func, inner) => {
+                            if self.state.support.contains_t2(func) {
                                 inner
                             } else {
                                 continue;
@@ -1159,8 +1171,74 @@ impl<T: Transport> Engine<T> {
                     _ => None,
                 }
             }
+            CommandT2::PeriRetParam => {
+                if let Ok(p) = PeripheralRetParamDeviceList::deserialize(data) {
+                    self.apply_multipoint_list(p);
+                    Some(DeviceEvent::Multipoint)
+                } else {
+                    None
+                }
+            }
+            CommandT2::PeriNtfyExtendedParam => {
+                let ty = *data.get(1).unwrap_or(&0xFF);
+                if ty == PeripheralInquiredType::SourceSwitchControl.to_u8() {
+                    if let Ok(p) = PeripheralNotifyExtendedParamSourceSwitch::deserialize(data) {
+                        if p.result == SourceSwitchControlResult::Success {
+                            log::debug!("engine: multipoint switched to {}", p.address);
+                            self.state.multipoint_playback = self
+                                .state
+                                .multipoint_devices
+                                .iter()
+                                .position(|d| d.address == p.address);
+                            Some(DeviceEvent::Multipoint)
+                        } else {
+                            log::warn!("engine: multipoint switch failed: {:?}", p.result);
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else if let Ok(p) =
+                    PeripheralNotifyExtendedParamDeviceManagement::deserialize(data)
+                {
+                    log::debug!(
+                        "engine: peripheral {:?} result 0x{:02X} for {}",
+                        p.action,
+                        p.result,
+                        p.address
+                    );
+                    None
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
+    }
+
+    /// Adopts a fresh multipoint device list, mapping the playback index
+    /// into the new list.
+    fn apply_multipoint_list(&mut self, p: PeripheralRetParamDeviceList) {
+        self.state.multipoint_devices = p
+            .devices
+            .into_iter()
+            .map(|d| MultipointDevice {
+                address: d.address,
+                name: d.name,
+                connected: d.connected,
+            })
+            .collect();
+        let idx = p.playback_device as usize;
+        self.state.multipoint_playback = if idx < self.state.multipoint_devices.len() {
+            Some(idx)
+        } else {
+            None
+        };
+        log::debug!(
+            "engine: multipoint list ({} device(s), playback #{:?})",
+            self.state.multipoint_devices.len(),
+            self.state.multipoint_playback
+        );
     }
 }
 
@@ -1210,6 +1288,7 @@ fn gs_type(idx: usize) -> GsInquiredType {
 
 fn build_init_steps(state: &DeviceState) -> Vec<Step> {
     use FunctionTable1 as F1;
+    use FunctionTable2 as F2;
     let _s = &state.support;
     let mut steps = vec![Step::send(ConnectGetProtocolInfo.serialize())];
     steps.push(Step::Await(Wait::ProtocolInfo));
@@ -1238,6 +1317,28 @@ fn build_init_steps(state: &DeviceState) -> Vec<Step> {
         Step::send_t2(T2ConnectGetSupportFunction.serialize()),
         Step::Await(Wait::SupportFunction),
     ]));
+
+    // Multipoint: paired/connected device list. Both variants are queried
+    // when advertised (the class-of-device one takes precedence on the
+    // device side, mirroring `RequestInitV2` in the reference client).
+    steps.push(Step::IfSupport2(
+        F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt,
+        vec![Step::send_t2(
+            PeripheralGetParam {
+                type_: PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice,
+            }
+            .serialize(),
+        )],
+    ));
+    steps.push(Step::IfSupport2(
+        F2::PairingDeviceManagementClassicBt,
+        vec![Step::send_t2(
+            PeripheralGetParam {
+                type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
+            }
+            .serialize(),
+        )],
+    ));
 
     // General settings (capabilities + values).
     for i in 0..4 {
@@ -1461,6 +1562,7 @@ fn build_init_steps(state: &DeviceState) -> Vec<Step> {
 
 fn build_sync_steps(state: &DeviceState) -> Vec<Step> {
     use FunctionTable1 as F1;
+    use FunctionTable2 as F2;
     let s = &state.support;
     let mut steps = Vec::new();
 
@@ -1510,12 +1612,34 @@ fn build_sync_steps(state: &DeviceState) -> Vec<Step> {
         ));
     }
 
+    // Multipoint device list refresh (both advertised variants; the second
+    // overwrites the first with the same data plus the class-of-device field).
+    steps.push(Step::IfSupport2(
+        F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt,
+        vec![Step::send_t2(
+            PeripheralGetParam {
+                type_: PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice,
+            }
+            .serialize(),
+        )],
+    ));
+    steps.push(Step::IfSupport2(
+        F2::PairingDeviceManagementClassicBt,
+        vec![Step::send_t2(
+            PeripheralGetParam {
+                type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
+            }
+            .serialize(),
+        )],
+    ));
+
     steps.push(Step::Done(DeviceEvent::SyncOk));
     steps
 }
 
 fn build_commit_steps(state: &DeviceState, props: &mut Properties) -> Vec<Step> {
     use FunctionTable1 as F1;
+    use FunctionTable2 as F2;
     let s = &state.support;
     let mut steps = Vec::new();
 
@@ -1643,6 +1767,44 @@ fn build_commit_steps(state: &DeviceState, props: &mut Properties) -> Vec<Step> 
             }
             .serialize(),
         ));
+    }
+    // Multipoint request (one-shot): switch playback or connect a device.
+    if let Some(req) = props.multipoint_request.desired.clone() {
+        props.multipoint_request.overwrite(None);
+        let payload: Option<Vec<u8>> = match req {
+            MultipointRequest::Switch { address } => {
+                log::info!("engine: switching multipoint playback to {address}");
+                Some(PeripheralSetExtendedParamSourceSwitch { address }.serialize())
+            }
+            MultipointRequest::Connect { address } => {
+                log::info!("engine: connecting multipoint device {address}");
+                // The reference client prefers the class-of-device variant
+                // when advertised, falling back to the classic one.
+                let t = if s
+                    .contains_t2(F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt)
+                    || s.contains_t2(F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicLe)
+                {
+                    PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice
+                } else {
+                    PeripheralInquiredType::PairingDeviceManagementClassicBt
+                };
+                steps.push(Step::send_t2(
+                    PeripheralSetExtendedParamDeviceManagement {
+                        type_: t,
+                        action: ConnectivityActionType::Connect,
+                        address,
+                    }
+                    .serialize(),
+                ));
+                // Re-query the list so the new connection state shows up in
+                // the menu (the device's result notification carries no list).
+                steps.push(Step::send_t2(PeripheralGetParam { type_: t }.serialize()));
+                None
+            }
+        };
+        if let Some(payload) = payload {
+            steps.push(Step::send_t2(payload));
+        }
     }
     // Speak to Chat.
     if s.contains_t1(F1::SmartTalkingModeType2) {

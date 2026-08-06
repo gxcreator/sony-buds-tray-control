@@ -276,21 +276,28 @@ u8_enum_no_unknown! {
 
 u8_enum_no_unknown! {
     /// MDR V2 Table 2 command opcodes (subset used by this app).
+    ///
+    /// Values match `ProtocolV2T2.hpp` from the reference client, as
+    /// confirmed on real hardware (the device replies to PERI_GET_PARAM
+    /// with `0x37` device lists).
     CommandT2 {
         ConnectRetProtocolInfo = 0x01,
         ConnectGetSupportFunction = 0x06,
         ConnectRetSupportFunction = 0x07,
-        PeriSetExtendedParam = 0x68,
-        PeriGetStatus = 0x62,
-        PeriSetStatus = 0x64,
-        PeriNtfyStatus = 0x65,
-        PeriGetParam = 0x66,
-        PeriRetParam = 0x67,
-        PeriNtfyParam = 0x69,
-        VoiceGuidanceGetParam = 0x36,
-        VoiceGuidanceRetParam = 0x37,
-        VoiceGuidanceSetParam = 0x38,
-        VoiceGuidanceNtfyParam = 0x39,
+        PeriGetStatus = 0x32,
+        PeriRetStatus = 0x33,
+        PeriSetStatus = 0x34,
+        PeriNtfyStatus = 0x35,
+        PeriGetParam = 0x36,
+        PeriRetParam = 0x37,
+        PeriSetParam = 0x38,
+        PeriNtfyParam = 0x39,
+        PeriSetExtendedParam = 0x3C,
+        PeriNtfyExtendedParam = 0x3D,
+        VoiceGuidanceGetParam = 0x46,
+        VoiceGuidanceRetParam = 0x47,
+        VoiceGuidanceSetParam = 0x48,
+        VoiceGuidanceNtfyParam = 0x49,
         Unknown = 0xFF,
     }
 }
@@ -1358,17 +1365,51 @@ u8_enum! {
 }
 
 u8_enum! {
-    /// `VoiceGuidanceInquiredType` (Table 2).
+    /// `PeripheralInquiredType` (Table 2, peripheral/device management).
+    PeripheralInquiredType {
+        PairingDeviceManagementClassicBt = 0x00,
+        SourceSwitchControl = 0x01,
+        PairingDeviceManagementWithBluetoothClassOfDevice = 0x02,
+        MusicHandOverSetting = 0x03,
+        Unknown = 0xFF,
+    }
+}
+
+u8_enum! {
+    /// `ConnectivityActionType` (Table 2, peripheral device management).
+    ConnectivityActionType {
+        Disconnect = 0x00,
+        Connect = 0x01,
+        Unpair = 0x02,
+        Unknown = 0xFF,
+    }
+}
+
+u8_enum! {
+    /// `SourceSwitchControlResult` (Table 2, peripheral source switch notify).
+    SourceSwitchControlResult {
+        Success = 0x00,
+        Fail = 0x01,
+        FailCalling = 0x02,
+        FailA2dpNotConnect = 0x03,
+        FailGivePriorityToVoiceAssistant = 0x04,
+        Unknown = 0xFF,
+    }
+}
+
+u8_enum! {
+    /// `VoiceGuidanceInquiredType` (Table 2). Values match
+    /// `ProtocolV2T2.hpp` from the reference client.
     VoiceGuidanceInquiredType {
         MtkTransferWoDisconnectionNotSupportLanguageSwitch = 0x00,
         MtkTransferWoDisconnectionSupportLanguageSwitch = 0x01,
-        Volume = 0x02,
-        VolumeSettingFixedTo5Steps = 0x03,
-        SupportLanguageSwitch = 0x04,
-        OnlyOnOffSetting = 0x05,
-        BatteryLevelVoice = 0x06,
-        PowerOnOffSound = 0x07,
-        SoundEffectUltBeepOnOff = 0x08,
+        SupportLanguageSwitch = 0x02,
+        OnlyOnOffSetting = 0x03,
+        Volume = 0x20,
+        VolumeSettingFixedTo5Steps = 0x21,
+        BatteryLevelVoice = 0x30,
+        PowerOnOffSound = 0x31,
+        SoundEffectUltBeepOnOff = 0x32,
         Unknown = 0xFF,
     }
 }

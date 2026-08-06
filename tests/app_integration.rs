@@ -46,7 +46,7 @@ fn harness() -> (AppCore, Arc<Mutex<Vec<MockDevice>>>) {
 #[allow(clippy::await_holding_lock)]
 async fn pump_app(app: &mut AppCore, devices: &Arc<Mutex<Vec<MockDevice>>>) {
     let mut quiet = 0u32;
-    for _ in 0..600 {
+    for _it in 0..600 {
         let mut acted = false;
         let before: usize = devices
             .lock()
@@ -288,6 +288,108 @@ async fn menu_radio_states_follow_device_reports() {
         .expect("NC radio present");
     match &nc.kind {
         ItemKind::Radio { checked, .. } => assert!(*checked, "NC should be checked"),
+        _ => panic!("expected radio item"),
+    }
+}
+
+#[tokio::test]
+async fn multipoint_menu_lists_devices_and_switches_playback() {
+    let (mut app, devices) = harness();
+
+    app.apply_command(UiCommand::Connect {
+        mac: "AA:BB:CC:DD:EE:FF".into(),
+    });
+    pump_app(&mut app, &devices).await;
+    pump_app(&mut app, &devices).await;
+
+    // The multipoint submenu lists both devices, playback one checked.
+    let snap = app.snapshot();
+    let items = flatten(&snap.menu);
+    let mp = items
+        .iter()
+        .find(|i| i.label == "🔁 Multipoint")
+        .expect("multipoint submenu present");
+    let children = match &mp.kind {
+        ItemKind::Submenu(c) => c,
+        _ => panic!("expected submenu"),
+    };
+    let phone = children
+        .iter()
+        .find(|i| i.label.contains("My Phone"))
+        .expect("phone row");
+    let laptop = children
+        .iter()
+        .find(|i| i.label.contains("Laptop"))
+        .expect("laptop row");
+    match &phone.kind {
+        ItemKind::Radio { checked, .. } => assert!(*checked, "phone is the playback device"),
+        _ => panic!("expected radio item"),
+    }
+    match &laptop.kind {
+        ItemKind::Radio { checked, .. } => assert!(!*checked, "laptop is not playing"),
+        _ => panic!("expected radio item"),
+    }
+    // The disconnected device is marked as paired.
+    assert!(children.iter().any(|i| i.label.contains("· paired")));
+
+    // The paired laptop is not connected: clicking it connects it.
+    let cmd = match &laptop.kind {
+        ItemKind::Radio { cmd, .. } => cmd.clone(),
+        _ => unreachable!(),
+    };
+    app.apply_command(cmd);
+    app.apply_command(UiCommand::RefreshSync);
+    pump_app(&mut app, &devices).await;
+    let laptop_connected = {
+        let devs = devices.lock().unwrap();
+        let device = devs.first().expect("device created");
+        device.state.multipoint_devices[1].2
+    };
+    assert!(laptop_connected, "laptop connected");
+
+    // With the laptop connected, the row now switches playback to it.
+    let snap = app.snapshot();
+    let items = flatten(&snap.menu);
+    let mp = items
+        .iter()
+        .find(|i| i.label == "🔁 Multipoint")
+        .expect("multipoint submenu present");
+    let children = match &mp.kind {
+        ItemKind::Submenu(c) => c,
+        _ => panic!("expected submenu"),
+    };
+    let laptop = children
+        .iter()
+        .find(|i| i.label.contains("Laptop"))
+        .expect("laptop row");
+    let cmd = match &laptop.kind {
+        ItemKind::Radio { cmd, .. } => cmd.clone(),
+        _ => unreachable!(),
+    };
+    app.apply_command(cmd);
+    pump_app(&mut app, &devices).await;
+    // The device confirmed the switch and the radio moved.
+    let devs = devices.lock().unwrap();
+    let device = devs.first().expect("device created");
+    assert_eq!(device.state.multipoint_playback, 1);
+    drop(devs);
+
+    let snap = app.snapshot();
+    let items = flatten(&snap.menu);
+    let mp = items
+        .iter()
+        .find(|i| i.label == "🔁 Multipoint")
+        .expect("multipoint submenu present");
+    let children = match &mp.kind {
+        ItemKind::Submenu(c) => c,
+        _ => panic!("expected submenu"),
+    };
+    let laptop = children
+        .iter()
+        .find(|i| i.label.contains("Laptop"))
+        .expect("laptop row");
+    match &laptop.kind {
+        ItemKind::Radio { checked, .. } => assert!(*checked, "laptop is now the playback device"),
         _ => panic!("expected radio item"),
     }
 }

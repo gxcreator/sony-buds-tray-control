@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::device::{DeviceEvent, Engine};
+use crate::device::{DeviceEvent, Engine, MultipointRequest};
 use crate::protocol::*;
 use crate::transport::{Transport, TransportKind, BLE_SERVICE_UUID_TANDEM_OVER_BLE_HPC};
 
@@ -74,6 +74,8 @@ pub enum UiCommand {
     SetCinema(bool),
     SetGeneralSetting(usize, bool),
     SetAutoConnect(bool),
+    MultipointSwitch { address: String },
+    MultipointConnect { address: String },
     Quit,
 }
 
@@ -466,6 +468,18 @@ impl AppCore {
                 }
                 self.config.save();
             }
+            MultipointSwitch { address } => {
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.props.multipoint_request.desired =
+                        Some(MultipointRequest::Switch { address });
+                }
+            }
+            MultipointConnect { address } => {
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.props.multipoint_request.desired =
+                        Some(MultipointRequest::Connect { address });
+                }
+            }
             Quit => {}
         }
         self.menu_dirty = true;
@@ -813,6 +827,14 @@ impl AppCore {
                     ],
                 ));
 
+                // Multipoint: paired/connected devices, switch playback.
+                if self.multipoint_supported(engine) {
+                    items.push(MenuItem::submenu(
+                        "🔁 Multipoint",
+                        self.build_multipoint_menu(engine),
+                    ));
+                }
+
                 // Speak to Chat.
                 if self.stc_supported(engine) {
                     items.push(MenuItem::submenu(
@@ -980,6 +1002,48 @@ impl AppCore {
                 UiCommand::SetNoiseSensitivity(NoiseAdaptiveSensitivity::Low),
             ));
         }
+        items
+    }
+
+    fn multipoint_supported(&self, engine: &Engine<Box<dyn Transport>>) -> bool {
+        use crate::protocol::FunctionTable2 as F2;
+        let s = &engine.state.support;
+        s.contains_t2(F2::PairingDeviceManagementClassicBt)
+            || s.contains_t2(F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt)
+    }
+
+    fn build_multipoint_menu(&self, engine: &Engine<Box<dyn Transport>>) -> Vec<MenuItem> {
+        let s = &engine.state;
+        let mut items = Vec::new();
+        if s.multipoint_devices.is_empty() {
+            items.push(MenuItem::action("No devices"));
+        } else {
+            for (i, d) in s.multipoint_devices.iter().enumerate() {
+                let is_playback = s.multipoint_playback == Some(i);
+                let label = if d.name.is_empty() {
+                    d.address.clone()
+                } else {
+                    format!("{} ({})", d.name, d.address)
+                };
+                let label = if !d.connected && !is_playback {
+                    format!("{label} · paired")
+                } else {
+                    label
+                };
+                let cmd = if d.connected {
+                    UiCommand::MultipointSwitch {
+                        address: d.address.clone(),
+                    }
+                } else {
+                    UiCommand::MultipointConnect {
+                        address: d.address.clone(),
+                    }
+                };
+                items.push(MenuItem::radio(label, is_playback, cmd));
+            }
+        }
+        items.push(MenuItem::separator());
+        items.push(MenuItem::cmd("🔄 Refresh", UiCommand::RefreshSync));
         items
     }
 

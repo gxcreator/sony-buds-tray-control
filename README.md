@@ -11,6 +11,7 @@ Tested on WH-1000XM6 and WF-1000XM5
 ## Features
 - Control almost all features supported by Android app from tray
 - Quickly switch NC mode by single click on tray icon
+- Display multipoint devices, switch playback or connect a paired device
 
 Both transports used by the reference client are supported:
 - Classic Bluetooth via RFCOMM + SDP service discovery via `libbluetooth` and BLE GATT (TANDEM_OVER_BLE_HPC service via BlueZ D-Bus)

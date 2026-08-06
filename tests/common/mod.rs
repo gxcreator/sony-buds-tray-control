@@ -40,6 +40,10 @@ pub struct DeviceSimState {
     pub bgm_enabled: bool,
     pub bgm_room: RoomSize,
     pub cinema: bool,
+    /// Multipoint devices: (address, name, connected).
+    pub multipoint_devices: Vec<(String, String, bool)>,
+    /// Index into `multipoint_devices` of the playback device.
+    pub multipoint_playback: u8,
 }
 
 impl Default for DeviceSimState {
@@ -76,6 +80,11 @@ impl Default for DeviceSimState {
             bgm_enabled: false,
             bgm_room: RoomSize::Small,
             cinema: false,
+            multipoint_devices: vec![
+                ("AA:11:22:33:44:55".into(), "My Phone".into(), true),
+                ("BB:11:22:33:44:55".into(), "Laptop".into(), false),
+            ],
+            multipoint_playback: 0,
         }
     }
 }
@@ -124,7 +133,8 @@ impl DeviceProfile {
         ];
         use FunctionTable2 as F2;
         let t2 = [F2::VoiceGuidanceSettingMtkTransferWithoutDisconnectionSupportLanguageSwitchAndVolumeAdjustment,
-            F2::PairingDeviceManagementClassicBt];
+            F2::PairingDeviceManagementClassicBt,
+            F2::PairingDeviceManagementWithBluetoothClassOfDeviceClassicBt];
         Self {
             has_table2: true,
             nc_asm_type: NcAsmInquiredType::AsmSeamless,
@@ -921,6 +931,80 @@ impl MockDevice {
                     _ => {
                         if let Ok(p) = VoiceGuidanceSetParamVolume::deserialize(data) {
                             self.state.voice_guidance_volume = p.volume;
+                        }
+                    }
+                }
+            }
+            CommandT2::PeriGetParam => {
+                let ty = data.get(1).copied().unwrap_or(0xFF);
+                let type_ = match PeripheralInquiredType::from_u8(ty) {
+                    PeripheralInquiredType::PairingDeviceManagementClassicBt
+                    | PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice => {
+                        PeripheralInquiredType::from_u8(ty)
+                    }
+                    _ => return out,
+                };
+                out.push((
+                    DataType::DataMdrNo2,
+                    PeripheralRetParamDeviceList {
+                        type_,
+                        devices: self
+                            .state
+                            .multipoint_devices
+                            .iter()
+                            .map(|(a, n, c)| PeripheralDeviceInfo {
+                                address: a.clone(),
+                                connected: *c,
+                                name: n.clone(),
+                                class_of_device: Some(0x5A020C),
+                            })
+                            .collect(),
+                        playback_device: self.state.multipoint_playback,
+                    }
+                    .serialize(),
+                ));
+            }
+            CommandT2::PeriSetExtendedParam => {
+                let ty = data.get(1).copied().unwrap_or(0xFF);
+                if ty == PeripheralInquiredType::SourceSwitchControl.to_u8() {
+                    if let Ok(p) = PeripheralSetExtendedParamSourceSwitch::deserialize(data) {
+                        if let Some(i) = self
+                            .state
+                            .multipoint_devices
+                            .iter()
+                            .position(|(a, _, _)| a == &p.address)
+                        {
+                            self.state.multipoint_playback = i as u8;
+                            out.push((
+                                DataType::DataMdrNo2,
+                                PeripheralNotifyExtendedParamSourceSwitch {
+                                    result: SourceSwitchControlResult::Success,
+                                    address: p.address,
+                                }
+                                .serialize(),
+                            ));
+                        }
+                    }
+                } else if let Ok(p) = PeripheralSetExtendedParamDeviceManagement::deserialize(data)
+                {
+                    if p.action == ConnectivityActionType::Connect {
+                        if let Some(d) = self
+                            .state
+                            .multipoint_devices
+                            .iter_mut()
+                            .find(|(a, _, _)| a == &p.address)
+                        {
+                            d.2 = true;
+                            out.push((
+                                DataType::DataMdrNo2,
+                                PeripheralNotifyExtendedParamDeviceManagement {
+                                    type_: p.type_,
+                                    action: p.action,
+                                    result: 0x10, // CONNECTION_SUCCESS
+                                    address: p.address,
+                                }
+                                .serialize(),
+                            ));
                         }
                     }
                 }

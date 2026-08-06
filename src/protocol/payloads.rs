@@ -1376,6 +1376,246 @@ pub fn log_set_status_payload() -> Vec<u8> {
     vec![CommandT1::LogSetStatus.to_u8(), 0x01, 0x00]
 }
 
+/// Fixed length of the ASCII MAC address in peripheral payloads:
+/// `"XX:XX:XX:XX:XX:XX"`, no NUL terminator (`kMacAddressLength`).
+const MAC_LEN: usize = 17;
+
+/// Pads/truncates a MAC address to the 17-byte wire format.
+fn mac_bytes(address: &str) -> [u8; MAC_LEN] {
+    let mut out = [b' '; MAC_LEN];
+    for (i, b) in address.as_bytes().iter().take(MAC_LEN).enumerate() {
+        out[i] = *b;
+    }
+    out
+}
+
+/// Reads a 17-byte wire MAC, tolerating NUL/space padding.
+fn mac_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
+}
+
+/// One device in the peripheral device management list
+/// (`PeripheralDeviceInfo` / `PeripheralDeviceInfoWithBluetoothClassOfDevice`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralDeviceInfo {
+    pub address: String,
+    pub connected: bool,
+    pub name: String,
+    /// Bluetooth class of device (only present in the type-0x02 variant).
+    pub class_of_device: Option<u32>,
+}
+
+impl PeripheralDeviceInfo {
+    fn write_to(&self, w: &mut Writer, with_class: bool) -> SerResult<()> {
+        w.bytes(&mac_bytes(&self.address))?;
+        w.u8(self.connected as u8)?;
+        if with_class {
+            let class = self.class_of_device.unwrap_or(0xFF_FFFF);
+            w.u8((class >> 16) as u8)?;
+            w.u8((class >> 8) as u8)?;
+            w.u8(class as u8)?;
+        }
+        w.prefixed_string(&self.name)
+    }
+
+    fn read_from(r: &mut Reader<'_>, with_class: bool) -> SerResult<Self> {
+        let address = mac_string(r.take(MAC_LEN)?);
+        let connected = r.u8()? != 0;
+        let class_of_device = if with_class {
+            let b = r.take(3)?;
+            Some(u32::from_be_bytes([0, b[0], b[1], b[2]]))
+        } else {
+            None
+        };
+        Ok(Self {
+            address,
+            connected,
+            name: read_prefixed_string(r)?,
+            class_of_device,
+        })
+    }
+}
+
+/// `PERI_GET_PARAM` — request the paired/connected device list
+/// (multipoint). The type selects the classic-BT or class-of-device variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralGetParam {
+    pub type_: PeripheralInquiredType,
+}
+
+impl Payload for PeripheralGetParam {
+    fn write(&self, w: &mut Writer) -> SerResult<()> {
+        w.u8(CommandT2::PeriGetParam.to_u8())?;
+        w.u8(self.type_.to_u8())
+    }
+    fn read(r: &mut Reader<'_>) -> SerResult<Self> {
+        r.u8()?;
+        Ok(Self {
+            type_: PeripheralInquiredType::from_u8(r.u8()?),
+        })
+    }
+}
+
+/// `PERI_RET/NTFY_PARAM` — the device management list
+/// (`PeripheralParamPairingDeviceManagement*`). Type 0x00 entries carry no
+/// class-of-device field; type 0x02 entries carry a 3-byte BE one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralRetParamDeviceList {
+    pub type_: PeripheralInquiredType,
+    pub devices: Vec<PeripheralDeviceInfo>,
+    /// Index of the current playback (multipoint) device.
+    pub playback_device: u8,
+}
+
+impl PeripheralRetParamDeviceList {
+    fn with_class(&self) -> bool {
+        self.type_ == PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice
+    }
+}
+
+impl Payload for PeripheralRetParamDeviceList {
+    fn write(&self, w: &mut Writer) -> SerResult<()> {
+        w.u8(CommandT2::PeriRetParam.to_u8())?;
+        w.u8(self.type_.to_u8())?;
+        if self.devices.len() >= 256 {
+            return Err(SerError::InvalidArgument);
+        }
+        w.u8(self.devices.len() as u8)?;
+        let with_class = self.with_class();
+        for d in &self.devices {
+            d.write_to(w, with_class)?;
+        }
+        w.u8(self.playback_device)
+    }
+    fn read(r: &mut Reader<'_>) -> SerResult<Self> {
+        r.u8()?;
+        let type_ = PeripheralInquiredType::from_u8(r.u8()?);
+        let with_class =
+            type_ == PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice;
+        let count = r.u8()? as usize;
+        let mut devices = Vec::with_capacity(count);
+        for _ in 0..count {
+            devices.push(PeripheralDeviceInfo::read_from(r, with_class)?);
+        }
+        let playback_device = r.u8()?;
+        Ok(Self {
+            type_,
+            devices,
+            playback_device,
+        })
+    }
+}
+
+/// `PERI_SET_EXTENDED_PARAM` / SOURCE_SWITCH_CONTROL — switch the playback
+/// device to `address`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralSetExtendedParamSourceSwitch {
+    pub address: String,
+}
+
+impl Payload for PeripheralSetExtendedParamSourceSwitch {
+    fn write(&self, w: &mut Writer) -> SerResult<()> {
+        w.u8(CommandT2::PeriSetExtendedParam.to_u8())?;
+        w.u8(PeripheralInquiredType::SourceSwitchControl.to_u8())?;
+        w.bytes(&mac_bytes(&self.address))
+    }
+    fn read(r: &mut Reader<'_>) -> SerResult<Self> {
+        r.u8()?;
+        r.u8()?;
+        Ok(Self {
+            address: mac_string(r.take(MAC_LEN)?),
+        })
+    }
+}
+
+/// `PERI_SET_EXTENDED_PARAM` / device management — connect/disconnect/unpair
+/// a paired device (`PeripheralSetExtendedParamParingDeviceManagementCommon`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralSetExtendedParamDeviceManagement {
+    pub type_: PeripheralInquiredType,
+    pub action: ConnectivityActionType,
+    pub address: String,
+}
+
+impl Payload for PeripheralSetExtendedParamDeviceManagement {
+    fn write(&self, w: &mut Writer) -> SerResult<()> {
+        w.u8(CommandT2::PeriSetExtendedParam.to_u8())?;
+        w.u8(self.type_.to_u8())?;
+        w.u8(self.action.to_u8())?;
+        w.bytes(&mac_bytes(&self.address))
+    }
+    fn read(r: &mut Reader<'_>) -> SerResult<Self> {
+        r.u8()?;
+        let type_ = PeripheralInquiredType::from_u8(r.u8()?);
+        let action = ConnectivityActionType::from_u8(r.u8()?);
+        Ok(Self {
+            type_,
+            action,
+            address: mac_string(r.take(MAC_LEN)?),
+        })
+    }
+}
+
+/// `PERI_NTFY_EXTENDED_PARAM` / SOURCE_SWITCH_CONTROL — result of a playback
+/// switch (`PeripheralNotifyExtendedParamSourceSwitchControl`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralNotifyExtendedParamSourceSwitch {
+    pub result: SourceSwitchControlResult,
+    pub address: String,
+}
+
+impl Payload for PeripheralNotifyExtendedParamSourceSwitch {
+    fn write(&self, w: &mut Writer) -> SerResult<()> {
+        w.u8(CommandT2::PeriNtfyExtendedParam.to_u8())?;
+        w.u8(PeripheralInquiredType::SourceSwitchControl.to_u8())?;
+        w.u8(self.result.to_u8())?;
+        w.bytes(&mac_bytes(&self.address))
+    }
+    fn read(r: &mut Reader<'_>) -> SerResult<Self> {
+        r.u8()?;
+        r.u8()?;
+        Ok(Self {
+            result: SourceSwitchControlResult::from_u8(r.u8()?),
+            address: mac_string(r.take(MAC_LEN)?),
+        })
+    }
+}
+
+/// `PERI_NTFY_EXTENDED_PARAM` / device management — result of a
+/// connect/disconnect/unpair (`PeripheralNotifyExtendedParamParingDeviceManagementCommon`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralNotifyExtendedParamDeviceManagement {
+    pub type_: PeripheralInquiredType,
+    pub action: ConnectivityActionType,
+    pub result: u8,
+    pub address: String,
+}
+
+impl Payload for PeripheralNotifyExtendedParamDeviceManagement {
+    fn write(&self, w: &mut Writer) -> SerResult<()> {
+        w.u8(CommandT2::PeriNtfyExtendedParam.to_u8())?;
+        w.u8(self.type_.to_u8())?;
+        w.u8(self.action.to_u8())?;
+        w.u8(self.result)?;
+        w.bytes(&mac_bytes(&self.address))
+    }
+    fn read(r: &mut Reader<'_>) -> SerResult<Self> {
+        r.u8()?;
+        let type_ = PeripheralInquiredType::from_u8(r.u8()?);
+        let action = ConnectivityActionType::from_u8(r.u8()?);
+        let result = r.u8()?;
+        Ok(Self {
+            type_,
+            action,
+            result,
+            address: mac_string(r.take(MAC_LEN)?),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1692,7 +1932,148 @@ mod tests {
             volume: 1,
             feedback_sound: OnOffSetting::On,
         });
+        roundtrip(&PeripheralGetParam {
+            type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
+        });
+        roundtrip(&PeripheralRetParamDeviceList {
+            type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
+            devices: vec![
+                PeripheralDeviceInfo {
+                    address: "AA:BB:CC:DD:EE:FF".into(),
+                    connected: true,
+                    name: "My Phone".into(),
+                    class_of_device: None,
+                },
+                PeripheralDeviceInfo {
+                    address: "11:22:33:44:55:66".into(),
+                    connected: false,
+                    name: String::new(),
+                    class_of_device: None,
+                },
+            ],
+            playback_device: 0,
+        });
+        roundtrip(&PeripheralRetParamDeviceList {
+            type_: PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice,
+            devices: vec![PeripheralDeviceInfo {
+                address: "AA:BB:CC:DD:EE:FF".into(),
+                connected: true,
+                name: "My Phone".into(),
+                class_of_device: Some(0x5A020C),
+            }],
+            playback_device: 0,
+        });
+        roundtrip(&PeripheralSetExtendedParamSourceSwitch {
+            address: "11:22:33:44:55:66".into(),
+        });
+        roundtrip(&PeripheralSetExtendedParamDeviceManagement {
+            type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
+            action: ConnectivityActionType::Connect,
+            address: "11:22:33:44:55:66".into(),
+        });
+        roundtrip(&PeripheralNotifyExtendedParamSourceSwitch {
+            result: SourceSwitchControlResult::Success,
+            address: "11:22:33:44:55:66".into(),
+        });
+        roundtrip(&PeripheralNotifyExtendedParamDeviceManagement {
+            type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
+            action: ConnectivityActionType::Connect,
+            result: 0x10,
+            address: "11:22:33:44:55:66".into(),
+        });
         assert_eq!(log_set_status_payload(), vec![0xC4, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn parses_real_device_list_frame() {
+        // First ~2 devices of the actual WH-1000XM5 response captured on
+        // hardware: [0x37, 0x02, 0x08, ...] with class-of-device entries.
+        let mut payload = vec![
+            0x37, 0x02, 0x02, // PERI_RET_PARAM, type 0x02, 2 devices
+        ];
+        payload.extend_from_slice(b"FC:70:2E:B6:5A:92");
+        payload.extend_from_slice(&[0x01, 0x6C, 0x01, 0x04, 0x0D]);
+        payload.extend_from_slice(b"cachyos-x8664");
+        payload.extend_from_slice(b"A4:A4:90:72:30:7D");
+        payload.extend_from_slice(&[0x02, 0x5A, 0x02, 0x0C, 0x05]);
+        payload.extend_from_slice(b"Phone");
+        payload.push(0x01); // playback device = index 1
+        let list = PeripheralRetParamDeviceList::deserialize(&payload).expect("parses");
+        assert_eq!(list.type_, PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice);
+        assert_eq!(list.devices.len(), 2);
+        assert_eq!(list.devices[0].address, "FC:70:2E:B6:5A:92");
+        assert!(list.devices[0].connected);
+        assert_eq!(list.devices[0].name, "cachyos-x8664");
+        assert_eq!(list.devices[0].class_of_device, Some(0x6C0104));
+        assert_eq!(list.devices[1].address, "A4:A4:90:72:30:7D");
+        assert_eq!(list.devices[1].name, "Phone");
+        assert_eq!(list.playback_device, 1);
+    }
+
+    #[test]
+    fn peripheral_wire_layout_spot_checks() {
+        // PERI_GET_PARAM: [0x36, type].
+        assert_eq!(
+            PeripheralGetParam {
+                type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
+            }
+            .serialize(),
+            vec![0x36, 0x00]
+        );
+        // Source switch: [0x3C, 0x01, 17-byte address].
+        let mut expected = vec![0x3C, 0x01];
+        expected.extend_from_slice(b"11:22:33:44:55:66");
+        assert_eq!(
+            PeripheralSetExtendedParamSourceSwitch {
+                address: "11:22:33:44:55:66".into(),
+            }
+            .serialize(),
+            expected
+        );
+        // Device management: [0x3C, type, action, 17-byte address].
+        let mut expected = vec![0x3C, 0x00, 0x01];
+        expected.extend_from_slice(b"11:22:33:44:55:66");
+        assert_eq!(
+            PeripheralSetExtendedParamDeviceManagement {
+                type_: PeripheralInquiredType::PairingDeviceManagementClassicBt,
+                action: ConnectivityActionType::Connect,
+                address: "11:22:33:44:55:66".into(),
+            }
+            .serialize(),
+            expected
+        );
+        // Source switch notify: [0x3D, 0x01, result, 17-byte address].
+        let mut expected = vec![0x3D, 0x01, 0x00];
+        expected.extend_from_slice(b"11:22:33:44:55:66");
+        assert_eq!(
+            PeripheralNotifyExtendedParamSourceSwitch {
+                result: SourceSwitchControlResult::Success,
+                address: "11:22:33:44:55:66".into(),
+            }
+            .serialize(),
+            expected
+        );
+        // Class-of-device list entry: [mac(17), connected, class(3 BE), name].
+        // Verified against the real device's `37 02 08 ...` response.
+        let mut expected = vec![0x37, 0x02, 0x01];
+        expected.extend_from_slice(b"11:22:33:44:55:66");
+        expected.extend_from_slice(&[0x01, 0x5A, 0x02, 0x0C, 0x08]);
+        expected.extend_from_slice(b"My Phone");
+        expected.push(0x00);
+        assert_eq!(
+            PeripheralRetParamDeviceList {
+                type_: PeripheralInquiredType::PairingDeviceManagementWithBluetoothClassOfDevice,
+                devices: vec![PeripheralDeviceInfo {
+                    address: "11:22:33:44:55:66".into(),
+                    connected: true,
+                    name: "My Phone".into(),
+                    class_of_device: Some(0x5A020C),
+                }],
+                playback_device: 0,
+            }
+            .serialize(),
+            expected
+        );
     }
 
     #[test]

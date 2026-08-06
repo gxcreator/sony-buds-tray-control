@@ -4,4 +4,7 @@ pub mod engine;
 pub mod state;
 
 pub use engine::{DeviceEvent, Engine, EngineError};
-pub use state::{BatteryState, DeviceState, GsCapability, Prop, Properties, SupportFunctions};
+pub use state::{
+    BatteryState, DeviceState, GsCapability, MultipointDevice, MultipointRequest, Prop, Properties,
+    SupportFunctions,
+};

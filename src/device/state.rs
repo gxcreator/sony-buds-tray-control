@@ -107,6 +107,23 @@ pub struct GsCapability {
     pub summary: String,
 }
 
+/// One device in the headphone's multipoint (peripheral) device list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipointDevice {
+    pub address: String,
+    pub name: String,
+    pub connected: bool,
+}
+
+/// A one-shot device management request (multipoint).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultipointRequest {
+    /// Switch playback to this device.
+    Switch { address: String },
+    /// Connect (attach) a paired device.
+    Connect { address: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceState {
     pub protocol_version: u32,
@@ -135,6 +152,11 @@ pub struct DeviceState {
     pub play_volume: u8,
 
     pub gs_capabilities: Vec<GsCapability>,
+
+    /// Multipoint (peripheral device management) list.
+    pub multipoint_devices: Vec<MultipointDevice>,
+    /// Index into `multipoint_devices` of the current playback device.
+    pub multipoint_playback: Option<usize>,
 }
 
 impl Default for DeviceState {
@@ -161,6 +183,8 @@ impl Default for DeviceState {
             play_status: PlaybackStatus::Unsettled,
             play_volume: 0,
             gs_capabilities: Vec::new(),
+            multipoint_devices: Vec::new(),
+            multipoint_playback: None,
         }
     }
 }
@@ -210,6 +234,8 @@ pub struct Properties {
     pub touch_function_right: Prop<Preset>,
     pub head_gesture_enabled: Prop<bool>,
     pub gs_param_bool: [Prop<bool>; 4],
+    /// One-shot multipoint request (switch/connect); consumed on commit.
+    pub multipoint_request: Prop<Option<MultipointRequest>>,
 }
 
 impl Default for Properties {
@@ -249,6 +275,7 @@ impl Default for Properties {
                 Prop::new(false),
                 Prop::new(false),
             ],
+            multipoint_request: Prop::new(None),
         }
     }
 }
@@ -285,6 +312,7 @@ impl Properties {
             || self.touch_function_right.dirty()
             || self.head_gesture_enabled.dirty()
             || self.gs_param_bool.iter().any(|p| p.dirty())
+            || self.multipoint_request.dirty()
     }
 
     /// Volume clamping to the device's [0, 30] range.
