@@ -118,7 +118,11 @@ impl Transport for GattTransport {
             log::error!("[gatt] no notifiable characteristic found");
             TransportError::NotFound
         })?;
-        log::debug!("[gatt] write char {:04x}, notify char {:04x}", write_char.id(), notify_char.id());
+        log::debug!(
+            "[gatt] write char {:04x}, notify char {:04x}",
+            write_char.id(),
+            notify_char.id()
+        );
 
         // Bridge notifications into the read pipe.
         let rx = self.rx.clone();

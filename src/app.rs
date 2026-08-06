@@ -762,7 +762,10 @@ impl AppCore {
                 items.push(MenuItem::separator());
                 items.push(self.build_connect_menu());
                 if self.reconnect {
-                    items.push(MenuItem::cmd("✖ Cancel auto-reconnect", UiCommand::Disconnect));
+                    items.push(MenuItem::cmd(
+                        "✖ Cancel auto-reconnect",
+                        UiCommand::Disconnect,
+                    ));
                 }
             }
             ConnState::Connecting => {
@@ -795,10 +798,7 @@ impl AppCore {
                 };
                 // Ambient sound.
                 if self.ambient_supported(engine) {
-                    items.push(MenuItem::submenu(
-                        "🍃 ANC",
-                        self.build_ambient_menu(engine),
-                    ));
+                    items.push(MenuItem::submenu("🍃 ANC", self.build_ambient_menu(engine)));
                 }
                 items.push(MenuItem::submenu(
                     "⏯️ Playback",
@@ -821,7 +821,10 @@ impl AppCore {
                     ));
                 }
                 // EQ & DSEE.
-                items.push(MenuItem::submenu("🎚️ Equalizer", self.build_eq_menu(engine)));
+                items.push(MenuItem::submenu(
+                    "🎚️ Equalizer",
+                    self.build_eq_menu(engine),
+                ));
                 // System settings.
                 items.push(MenuItem::submenu(
                     "⚙️ Settings",
@@ -1205,11 +1208,7 @@ impl AppCore {
 
 /// Cycles the NC/ambient mode one step forward: NC → Ambient Sound → Off →
 /// NC. Devices without ambient sound support just toggle NC on/off.
-fn cycle_ambient(
-    ambient_supported: bool,
-    enabled: bool,
-    mode: NcAsmMode,
-) -> (bool, NcAsmMode) {
+fn cycle_ambient(ambient_supported: bool, enabled: bool, mode: NcAsmMode) -> (bool, NcAsmMode) {
     if ambient_supported {
         match (enabled, mode) {
             (true, NcAsmMode::Nc) => (true, NcAsmMode::Asm),

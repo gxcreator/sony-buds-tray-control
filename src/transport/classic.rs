@@ -164,7 +164,10 @@ pub fn sdp_find_rfcomm_channel(
             let res = libc::poll(&mut pfd, 1, 200);
             if res > 0 {
                 if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-                    log::error!("[sdp] L2CAP connect failed (poll revents {:#x})", pfd.revents);
+                    log::error!(
+                        "[sdp] L2CAP connect failed (poll revents {:#x})",
+                        pfd.revents
+                    );
                     return Err(SdpError::Connect(last_errno()));
                 }
                 if pfd.revents & (libc::POLLIN | libc::POLLOUT) != 0 {
@@ -213,7 +216,14 @@ pub fn sdp_find_rfcomm_channel(
             log::error!("[sdp] service search failed (errno {})", last_errno());
             return Err(SdpError::Query(last_errno()));
         }
-        log::debug!("[sdp] service search ok, {} record(s)", if response.is_null() { 0 } else { count_records(response) });
+        log::debug!(
+            "[sdp] service search ok, {} record(s)",
+            if response.is_null() {
+                0
+            } else {
+                count_records(response)
+            }
+        );
         if response.is_null() {
             return Err(SdpError::ChannelNotFound(service_uuid.to_string()));
         }
@@ -471,9 +481,7 @@ impl Transport for ClassicTransport {
                     log::trace!("[classic] tx {n} bytes: {:02X?}", &data[..n.min(64)]);
                     return Ok(n);
                 }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::NotConnected && attempt < 5 =>
-                {
+                Err(e) if e.kind() == std::io::ErrorKind::NotConnected && attempt < 5 => {
                     log::warn!("[classic] write failed (DLC not ready?), retrying: {e}");
                     tokio::time::sleep(delay).await;
                     delay *= 2;

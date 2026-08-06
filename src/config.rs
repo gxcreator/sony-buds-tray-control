@@ -85,10 +85,8 @@ mod tests {
 
     #[test]
     fn config_round_trip() {
-        let dir = std::env::temp_dir().join(format!(
-            "sony-buds-config-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sony-buds-config-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = Config {
             auto_connect: true,

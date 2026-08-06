@@ -15,13 +15,11 @@ use sony_buds_tray_control::transport::TransportKind;
 fn test_config() -> sony_buds_tray_control::config::Config {
     // Isolated config dir so tests never read or write the user's real
     // settings (which would leak the mock MAC into the live app).
-    sony_buds_tray_control::config::Config::load_from(
-        std::env::temp_dir().join(format!(
-            "sony-buds-app-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("")
-        )),
-    )
+    sony_buds_tray_control::config::Config::load_from(std::env::temp_dir().join(format!(
+        "sony-buds-app-test-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("")
+    )))
 }
 
 fn harness() -> (AppCore, Arc<Mutex<Vec<MockDevice>>>) {
@@ -168,7 +166,10 @@ async fn auto_reconnect_after_connection_loss() {
         ConnState::Error(_) | ConnState::NotConnected
     ));
     assert!(
-        app.snapshot().menu.iter().any(|m| m.label.contains("Waiting")),
+        app.snapshot()
+            .menu
+            .iter()
+            .any(|m| m.label.contains("Waiting")),
         "menu should show the waiting state"
     );
 
@@ -176,7 +177,11 @@ async fn auto_reconnect_after_connection_loss() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     pump_app(&mut app, &devices).await;
     assert!(!app.is_connected());
-    assert_eq!(devices.lock().unwrap().len(), 0, "no connect attempts while away");
+    assert_eq!(
+        devices.lock().unwrap().len(),
+        0,
+        "no connect attempts while away"
+    );
 
     // User reconnects via the system UI: the app attaches on its own.
     device_connected.store(true, Ordering::SeqCst);
