@@ -650,6 +650,7 @@ impl<T: Transport> Engine<T> {
     }
 
     fn handle_frame(&mut self, data_type: DataType, seq: u8, data: Vec<u8>) -> Option<DeviceEvent> {
+        log::trace!("engine: rx {data_type:?} seq={seq}: {:02X?}", data);
         match data_type {
             DataType::Ack => self.advance_on(Wait::Ack),
             DataType::DataMdr => {
@@ -826,16 +827,26 @@ impl<T: Transport> Engine<T> {
             CommandT1::EqEbbRetStatus | CommandT1::EqEbbNtfyStatus => {
                 // [0x53, 0x00, onOff]
                 if data.len() >= 3 {
-                    self.props
-                        .eq_available
-                        .overwrite(data[2] == OnOffSetting::On.to_u8());
+                    let available = data[2] == OnOffSetting::On.to_u8();
+                    self.props.eq_available.overwrite(available);
+                    log::debug!(
+                        "engine: EQ status: available={available} (raw {:02X?})",
+                        &data[..data.len().min(6)]
+                    );
                     Some(DeviceEvent::Equalizer)
                 } else {
+                    log::warn!("engine: EQ status frame too short: {:02X?}", data);
                     None
                 }
             }
             CommandT1::EqEbbRetParam | CommandT1::EqEbbNtfyParam => {
                 if let Ok(p) = EqEbbParamEq::deserialize(data) {
+                    log::debug!(
+                        "engine: EQ param: preset={:?} {} band(s) (raw {:02X?})",
+                        p.preset_id,
+                        p.bands.len(),
+                        &data[..data.len().min(24)]
+                    );
                     self.props.eq_preset_id.overwrite(p.preset_id);
                     // Mirrors the reference client: a 6-band report carries
                     // clear bass + five bands, a 10-band report carries ten.

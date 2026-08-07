@@ -30,11 +30,9 @@ fn harness() -> (AppCore, Arc<Mutex<Vec<MockDevice>>>) {
             paired: true,
             connected: false,
         }]));
-    let devices: Arc<Mutex<Vec<MockDevice>>> = Arc::new(Mutex::new(Vec::new()));
-    let factory: Arc<dyn sony_buds_tray_control::app::TransportFactory> =
-        Arc::new(PairFactory(devices.clone()));
+    let (factory, devices) = PairFactory::new();
     (
-        AppCore::new_with_config(lister, factory, test_config()),
+        AppCore::new_with_config(lister, Arc::new(factory), test_config()),
         devices,
     )
 }
@@ -92,13 +90,11 @@ async fn auto_connect_connects_to_last_device_at_startup() {
             paired: true,
             connected: false,
         }]));
-    let devices: Arc<Mutex<Vec<MockDevice>>> = Arc::new(Mutex::new(Vec::new()));
-    let factory: Arc<dyn sony_buds_tray_control::app::TransportFactory> =
-        Arc::new(PairFactory(devices.clone()));
+    let (factory, devices) = PairFactory::new();
     let mut config = test_config();
     config.auto_connect = true;
     config.last_device = Some("AA:BB:CC:DD:EE:FF".into());
-    let mut app = AppCore::new_with_config(lister, factory, config);
+    let mut app = AppCore::new_with_config(lister, Arc::new(factory), config);
 
     // A single pump: refresh + auto-connect + full handshake.
     pump_app(&mut app, &devices).await;
@@ -142,13 +138,11 @@ async fn auto_reconnect_after_connection_loss() {
             },
             connected: device_connected.clone(),
         });
-    let devices: Arc<Mutex<Vec<MockDevice>>> = Arc::new(Mutex::new(Vec::new()));
-    let factory: Arc<dyn sony_buds_tray_control::app::TransportFactory> =
-        Arc::new(PairFactory(devices.clone()));
+    let (factory, devices) = PairFactory::new();
     let mut config = test_config();
     config.auto_connect = true;
     config.last_device = Some("AA:BB:CC:DD:EE:FF".into());
-    let mut app = AppCore::new_with_config(lister, factory, config);
+    let mut app = AppCore::new_with_config(lister, Arc::new(factory), config);
     app.reconnect_delay = std::time::Duration::from_millis(50);
 
     app.apply_command(UiCommand::Connect {
@@ -227,6 +221,51 @@ async fn connect_init_and_menu_reflect_device() {
     assert!(labels.iter().any(|l| l.contains("Ambient Sound")));
     assert!(labels.iter().any(|l| l.contains("Equalizer")));
     assert!(labels.iter().any(|l| l.contains("Quit")));
+}
+
+#[tokio::test]
+async fn xm6_eq_menu_offers_only_accepted_presets() {
+    // XM6 firmware silently rejects the classic preset ids (ACKed but
+    // reverted to Off); only the 0x30-family, Custom and Off are offered.
+    let lister: Arc<dyn sony_buds_tray_control::transport::discovery::DeviceLister> =
+        Arc::new(StaticDeviceLister(vec![DeviceInfo {
+            name: "WH-1000XM6".into(),
+            mac: "AA:BB:CC:DD:EE:FF".into(),
+            paired: true,
+            connected: false,
+        }]));
+    let (factory, devices) = PairFactory::with_model("WH-1000XM6");
+    let mut app = AppCore::new_with_config(lister, Arc::new(factory), test_config());
+
+    app.apply_command(UiCommand::Connect {
+        mac: "AA:BB:CC:DD:EE:FF".into(),
+    });
+    pump_app(&mut app, &devices).await;
+    pump_app(&mut app, &devices).await;
+    assert_eq!(app.conn_state, ConnState::Connected);
+
+    let snap = app.snapshot();
+    let labels: Vec<String> = flatten(&snap.menu).into_iter().map(|m| m.label).collect();
+    for preset in ["Off", "Heavy", "Clear", "Hard", "Soft", "Custom"] {
+        assert!(
+            labels.contains(&preset.to_string()),
+            "XM6 must offer {preset}, labels: {labels:?}"
+        );
+    }
+    for preset in ["Vocal", "Rock", "Pop", "Gaming", "Speech"] {
+        assert!(
+            !labels.contains(&preset.to_string()),
+            "XM6 must not offer {preset}, labels: {labels:?}"
+        );
+    }
+
+    // The accepted presets still commit to the device.
+    app.apply_command(UiCommand::SetEqPreset(EqPresetId::Heavy));
+    pump_app(&mut app, &devices).await;
+    {
+        let devs = devices.lock().unwrap();
+        assert_eq!(devs.first().unwrap().state.eq_preset, EqPresetId::Heavy);
+    }
 }
 
 #[tokio::test]

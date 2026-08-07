@@ -25,6 +25,7 @@ pub struct DeviceSimState {
     pub artist: String,
     pub eq_preset: EqPresetId,
     pub eq_bands: Vec<u8>,
+    pub model_name: String,
     pub dsee: bool,
     pub stc_enabled: bool,
     pub stc_sensitivity: DetectSensitivity,
@@ -67,6 +68,7 @@ impl Default for DeviceSimState {
             artist: "Test Artist".into(),
             eq_preset: EqPresetId::Off,
             eq_bands: vec![0; 10],
+            model_name: "WH-1000XM5".into(),
             dsee: false,
             stc_enabled: false,
             stc_sensitivity: DetectSensitivity::Auto,
@@ -267,7 +269,8 @@ impl MockDevice {
                     DeviceInfoType::ModelName => {
                         out.push((
                             DataType::DataMdr,
-                            DeviceInfoResponse::ModelName("WH-1000XM5".into()).serialize(),
+                            DeviceInfoResponse::ModelName(self.state.model_name.clone())
+                                .serialize(),
                         ));
                     }
                     DeviceInfoType::FwVersion => {
@@ -1104,7 +1107,34 @@ pub async fn pump(
 }
 
 /// A transport factory whose devices are exposed for inspection.
-pub struct PairFactory(pub std::sync::Arc<std::sync::Mutex<Vec<MockDevice>>>);
+pub struct PairFactory {
+    pub devices: std::sync::Arc<std::sync::Mutex<Vec<MockDevice>>>,
+    model: String,
+}
+
+impl PairFactory {
+    pub fn new() -> (Self, std::sync::Arc<std::sync::Mutex<Vec<MockDevice>>>) {
+        let devices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                devices: devices.clone(),
+                model: "WH-1000XM5".into(),
+            },
+            devices,
+        )
+    }
+
+    pub fn with_model(model: &str) -> (Self, std::sync::Arc<std::sync::Mutex<Vec<MockDevice>>>) {
+        let devices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                devices: devices.clone(),
+                model: model.into(),
+            },
+            devices,
+        )
+    }
+}
 
 #[async_trait::async_trait]
 impl sony_buds_tray_control::app::TransportFactory for PairFactory {
@@ -1113,8 +1143,9 @@ impl sony_buds_tray_control::app::TransportFactory for PairFactory {
         _kind: sony_buds_tray_control::transport::TransportKind,
     ) -> Result<Box<dyn sony_buds_tray_control::transport::Transport>, String> {
         let (host, device_tx) = MockTransport::pair();
-        let device = MockDevice::new(device_tx, DeviceProfile::xm5());
-        self.0.lock().unwrap().push(device);
+        let mut device = MockDevice::new(device_tx, DeviceProfile::xm5());
+        device.state.model_name = self.model.clone();
+        self.devices.lock().unwrap().push(device);
         Ok(Box::new(host))
     }
 }

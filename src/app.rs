@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::device::{DeviceEvent, Engine, MultipointRequest};
+use crate::device::{DeviceEvent, DeviceState, Engine, MultipointRequest};
 use crate::protocol::*;
 use crate::transport::{Transport, TransportKind, BLE_SERVICE_UUID_TANDEM_OVER_BLE_HPC};
 
@@ -1098,7 +1098,7 @@ impl AppCore {
         let p = &engine.props;
         let mut items = Vec::new();
         if p.eq_available.current || p.eq_preset_id.current != EqPresetId::Off {
-            for preset in EqPresetId::ALL {
+            for &preset in self.eq_presets(&engine.state) {
                 items.push(MenuItem::radio(
                     preset.to_string(),
                     p.eq_preset_id.current == preset,
@@ -1121,6 +1121,27 @@ impl AppCore {
             ));
         }
         items
+    }
+
+    /// Presets offered for the connected device. XM6 firmware silently
+    /// rejects the classic preset ids (EQEBB_SET_PARAM is ACKed but the
+    /// device reverts to Off); it only accepts the 0x30-family, Custom and
+    /// the user settings, so those are the only ones offered there.
+    /// (Verified by RFCOMM capture: mos9527/SonyHeadphonesClient PR #48.)
+    fn eq_presets(&self, s: &DeviceState) -> &'static [EqPresetId] {
+        const XM6: [EqPresetId; 6] = [
+            EqPresetId::Off,
+            EqPresetId::Heavy,
+            EqPresetId::Clear,
+            EqPresetId::Hard,
+            EqPresetId::Soft,
+            EqPresetId::Custom,
+        ];
+        if s.model_name.contains("XM6") {
+            &XM6
+        } else {
+            &EqPresetId::ALL
+        }
     }
 
     fn build_settings_menu(&self, engine: &Engine<Box<dyn Transport>>) -> Vec<MenuItem> {
